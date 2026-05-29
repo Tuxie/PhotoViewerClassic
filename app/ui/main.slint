@@ -1,0 +1,19 @@
+export component AppWindow inherits Window {
+    title: "Photo Viewer";
+    background: black;
+    preferred-width: 1024px;
+    preferred-height: 768px;
+
+    callback quit();
+    forward-focus: keys;
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape || event.text == "q" || event.text == "Q") {
+                root.quit();
+                return EventResult.accept;
+            }
+            return EventResult.reject;
+        }
+    }
+}

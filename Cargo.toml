@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["app"]
+
+[workspace.dependencies]
+slint = { version = "1.16", default-features = false, features = [
+    "backend-winit",
+    "renderer-femtovg",
+    "compat-1-2",
+] }
+slint-build = "1.16"
+image = { version = "0.25", features = ["gif", "webp"] }
+kamadak-exif = "0.6"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
