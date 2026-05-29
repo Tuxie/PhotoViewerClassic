@@ -62,3 +62,4 @@ Minimal. Bottom toolbar with buttons for Previous, Next, Rotate Left, Rotate Rig
 
 - Sleeping and/or polling is absolutely forbidden in the happy path. It is only allowed when recovering after error situations. Emit and/or react to events, don't poll. This includes in tests.
 - The GUI must be snappy and responsive at all times. The GUI may not be sluggish just because something heavy is going on in the background.
+- Push after every commit.
