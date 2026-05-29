@@ -171,6 +171,11 @@ git commit -m "feat: workspace scaffold + runnable Slint window"
 
 ## Task 2: `imageset` crate — directory set + natural sort + wrap navigation
 
+> **Post-review note:** during code review, `ImageSet::next`/`prev` were renamed to
+> **`advance`/`retreat`** to avoid shadowing `Iterator::next` (clippy
+> `should_implement_trait`). Tasks 5 and 6 below call `advance()`/`retreat()`
+> accordingly (the code blocks there still show the old names — use `advance`/`retreat`).
+
 **Files:**
 - Create: `./crates/imageset/Cargo.toml`
 - Create: `./crates/imageset/src/lib.rs`
