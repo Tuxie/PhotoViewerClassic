@@ -6,7 +6,7 @@ members = ["app"]
 slint = { version = "1.16", default-features = false, features = [
     "backend-winit",
     "renderer-femtovg",
-    "compat-1-2",
+    "compat-1-2",   # backward-compat shim (1.16: no-op, no extra deps; does NOT re-enable renderer-software)
 ] }
 slint-build = "1.16"
 image = { version = "0.25", features = ["gif", "webp"] }
