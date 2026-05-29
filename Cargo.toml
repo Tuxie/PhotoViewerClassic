@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["app"]
+members = ["app", "crates/imageset"]
 
 [workspace.dependencies]
 slint = { version = "1.16", default-features = false, features = [
