@@ -5,14 +5,12 @@ use std::path::Path;
 use image::imageops::{
     flip_horizontal, flip_vertical, resize, rotate180, rotate270, rotate90, FilterType,
 };
-use image::{DynamicImage, GenericImageView, ImageReader, RgbaImage};
+use image::{ImageReader, RgbaImage};
 
-/// Decode any supported image file to an RGBA8 buffer + its dimensions.
+/// Decode any supported image file to an RGBA8 buffer (call `.dimensions()` for size).
 /// Uses magic-byte sniffing (not the extension).
-pub fn decode_to_rgba8(path: &Path) -> image::ImageResult<(RgbaImage, u32, u32)> {
-    let dynimg: DynamicImage = ImageReader::open(path)?.with_guessed_format()?.decode()?;
-    let (w, h) = dynimg.dimensions();
-    Ok((dynimg.to_rgba8(), w, h))
+pub fn decode_to_rgba8(path: &Path) -> image::ImageResult<RgbaImage> {
+    Ok(ImageReader::open(path)?.with_guessed_format()?.decode()?.to_rgba8())
 }
 
 /// Read the EXIF Orientation tag (1..=8) if present, without decoding pixels.
@@ -33,9 +31,9 @@ pub fn apply_orientation(img: RgbaImage, orientation: u16) -> RgbaImage {
         2 => flip_horizontal(&img),
         3 => rotate180(&img),
         4 => flip_vertical(&img),
-        5 => rotate270(&flip_horizontal(&img)), // mirror horizontal + rotate 270 CW
+        5 => rotate270(&flip_horizontal(&img)), // transpose (mirror-H + rotate 270 CW)
         6 => rotate90(&img),                     // rotate 90 CW
-        7 => rotate90(&flip_horizontal(&img)),  // mirror horizontal + rotate 90 CW
+        7 => rotate90(&flip_horizontal(&img)),  // transverse (mirror-H + rotate 90 CW)
         8 => rotate270(&img),                    // rotate 270 CW
         _ => img,                                // 1 or unknown: as-is
     }
@@ -107,8 +105,8 @@ mod tests {
         src.put_pixel(0, 0, Rgba([10, 20, 30, 255]));
         src.save(&path).unwrap();
 
-        let (rgba, w, h) = decode_to_rgba8(&path).unwrap();
-        assert_eq!((w, h), (3, 2));
+        let rgba = decode_to_rgba8(&path).unwrap();
+        assert_eq!(rgba.dimensions(), (3, 2));
         assert_eq!(rgba.get_pixel(0, 0), &Rgba([10, 20, 30, 255]));
     }
 

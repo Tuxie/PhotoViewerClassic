@@ -754,7 +754,7 @@ fn load_image(weak: slint::Weak<AppWindow>, path: PathBuf) {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
         match decode::decode_to_rgba8(&path) {
-            Ok((rgba, _w, _h)) => {
+            Ok(rgba) => {
                 let orientation = decode::read_orientation(&path).unwrap_or(1);
                 let oriented = decode::apply_orientation(rgba, orientation);
                 let display = decode::downscale_to_fit(oriented, 4096);
@@ -933,7 +933,7 @@ fn caption(nav: &Arc<Mutex<imageset::ImageSet>>) -> String {
 fn load_image(weak: slint::Weak<AppWindow>, nav: Arc<Mutex<imageset::ImageSet>>, path: PathBuf) {
     std::thread::spawn(move || {
         match decode::decode_to_rgba8(&path) {
-            Ok((rgba, _w, _h)) => {
+            Ok(rgba) => {
                 let orientation = decode::read_orientation(&path).unwrap_or(1);
                 let oriented = decode::apply_orientation(rgba, orientation);
                 let display = decode::downscale_to_fit(oriented, 4096);
