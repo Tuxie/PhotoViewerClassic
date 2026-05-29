@@ -9,7 +9,10 @@ use image::{ImageReader, RgbaImage};
 /// Decode any supported image file to an RGBA8 buffer (call `.dimensions()` for size).
 /// Uses magic-byte sniffing (not the extension).
 pub fn decode_to_rgba8(path: &Path) -> image::ImageResult<RgbaImage> {
-    Ok(ImageReader::open(path)?.with_guessed_format()?.decode()?.to_rgba8())
+    Ok(ImageReader::open(path)?
+        .with_guessed_format()?
+        .decode()?
+        .to_rgba8())
 }
 
 /// Read the file once, decode to RGBA8, normalize EXIF orientation, and downscale
@@ -51,10 +54,10 @@ pub fn apply_orientation(img: RgbaImage, orientation: u16) -> RgbaImage {
         3 => rotate180(&img),
         4 => flip_vertical(&img),
         5 => rotate270(&flip_horizontal(&img)), // transpose (mirror-H + rotate 270 CW)
-        6 => rotate90(&img),                     // rotate 90 CW
+        6 => rotate90(&img),                    // rotate 90 CW
         7 => rotate90(&flip_horizontal(&img)),  // transverse (mirror-H + rotate 90 CW)
-        8 => rotate270(&img),                    // rotate 270 CW
-        _ => img,                                // 1 or unknown: as-is
+        8 => rotate270(&img),                   // rotate 270 CW
+        _ => img,                               // 1 or unknown: as-is
     }
 }
 

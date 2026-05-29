@@ -116,8 +116,8 @@ fn caption_for(idx: usize, len: usize, path: &Path) -> String {
 /// so the last-*completed* image wins (not necessarily the last-*requested*). A
 /// sequence guard / prefetch to enforce request order is deferred to a later plan.
 fn load_image(weak: slint::Weak<AppWindow>, caption: Option<String>, path: PathBuf) {
-    std::thread::spawn(move || {
-        match decode::display_image(&path, MAX_DISPLAY_DIM) {
+    std::thread::spawn(
+        move || match decode::display_image(&path, MAX_DISPLAY_DIM) {
             Ok(rgba) => {
                 let (w, h) = (rgba.width(), rgba.height());
                 let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
@@ -137,6 +137,6 @@ fn load_image(weak: slint::Weak<AppWindow>, caption: Option<String>, path: PathB
                 let msg = format!("Can't display {}: {e}", file_name_of(&path));
                 let _ = weak.upgrade_in_event_loop(move |c| c.set_status_text(msg.into()));
             }
-        }
-    });
+        },
+    );
 }

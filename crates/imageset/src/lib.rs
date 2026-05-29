@@ -27,19 +27,33 @@ pub fn natural_cmp_ci(a: &str, b: &str) -> Ordering {
                 if ca.is_ascii_digit() && cb.is_ascii_digit() {
                     let mut na = String::new();
                     while let Some(&c) = ai.peek() {
-                        if c.is_ascii_digit() { na.push(c); ai.next(); } else { break; }
+                        if c.is_ascii_digit() {
+                            na.push(c);
+                            ai.next();
+                        } else {
+                            break;
+                        }
                     }
                     let mut nb = String::new();
                     while let Some(&c) = bi.peek() {
-                        if c.is_ascii_digit() { nb.push(c); bi.next(); } else { break; }
+                        if c.is_ascii_digit() {
+                            nb.push(c);
+                            bi.next();
+                        } else {
+                            break;
+                        }
                     }
                     let ta = na.trim_start_matches('0');
                     let tb = nb.trim_start_matches('0');
                     let ord = ta.len().cmp(&tb.len()).then_with(|| ta.cmp(tb));
-                    if ord != Ordering::Equal { return ord; }
+                    if ord != Ordering::Equal {
+                        return ord;
+                    }
                 } else {
                     let ord = ca.to_ascii_lowercase().cmp(&cb.to_ascii_lowercase());
-                    if ord != Ordering::Equal { return ord; }
+                    if ord != Ordering::Equal {
+                        return ord;
+                    }
                     ai.next();
                     bi.next();
                 }
@@ -61,8 +75,14 @@ pub fn scan_dir(dir: &Path) -> Vec<PathBuf> {
         Err(_) => Vec::new(),
     };
     files.sort_by(|a, b| {
-        let an = a.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        let bn = b.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let an = a
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let bn = b
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
         natural_cmp_ci(&an, &bn)
     });
     files
@@ -76,12 +96,19 @@ pub struct ImageSet {
 
 impl ImageSet {
     pub fn new(files: Vec<PathBuf>, start: usize) -> Self {
-        let idx = if files.is_empty() { 0 } else { start.min(files.len() - 1) };
+        let idx = if files.is_empty() {
+            0
+        } else {
+            start.min(files.len() - 1)
+        };
         ImageSet { files, idx }
     }
 
     pub fn empty() -> Self {
-        ImageSet { files: Vec::new(), idx: 0 }
+        ImageSet {
+            files: Vec::new(),
+            idx: 0,
+        }
     }
 
     /// Scan the file's directory and position the cursor on that file.
@@ -91,33 +118,48 @@ impl ImageSet {
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
         let files = scan_dir(dir);
         if files.is_empty() {
-            return ImageSet { files: vec![path.to_path_buf()], idx: 0 };
+            return ImageSet {
+                files: vec![path.to_path_buf()],
+                idx: 0,
+            };
         }
         let idx = files.iter().position(|p| p == path).unwrap_or(0);
         ImageSet { files, idx }
     }
 
-    pub fn len(&self) -> usize { self.files.len() }
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
 
-    pub fn is_empty(&self) -> bool { self.files.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
 
     /// 0-based index of the current cursor.
-    pub fn position(&self) -> usize { self.idx }
+    pub fn position(&self) -> usize {
+        self.idx
+    }
 
     #[must_use]
-    pub fn current(&self) -> Option<PathBuf> { self.files.get(self.idx).cloned() }
+    pub fn current(&self) -> Option<PathBuf> {
+        self.files.get(self.idx).cloned()
+    }
 
     /// Advance the cursor with wrap-around; returns the new current path.
     /// Named `advance` (not `next`) to avoid shadowing `Iterator::next`.
     pub fn advance(&mut self) -> Option<PathBuf> {
-        if self.files.is_empty() { return None; }
+        if self.files.is_empty() {
+            return None;
+        }
         self.idx = (self.idx + 1) % self.files.len();
         self.current()
     }
 
     /// Step the cursor back with wrap-around; returns the new current path.
     pub fn retreat(&mut self) -> Option<PathBuf> {
-        if self.files.is_empty() { return None; }
+        if self.files.is_empty() {
+            return None;
+        }
         self.idx = (self.idx + self.files.len() - 1) % self.files.len();
         self.current()
     }
