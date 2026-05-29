@@ -52,7 +52,9 @@ slint = { version = "1.16", default-features = false, features = [
     "compat-1-2",
 ] }
 slint-build = "1.16"
-image = { version = "0.25", features = ["gif", "webp"] }
+# decode-only: default-features off drops the AVIF encoder (rav1e), TIFF, rayon from the
+# runtime binary. jpeg/png must be re-listed explicitly (dropped without default features).
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 kamadak-exif = "0.6"
 
 [profile.release]
