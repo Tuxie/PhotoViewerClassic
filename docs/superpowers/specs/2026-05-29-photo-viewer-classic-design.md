@@ -126,8 +126,13 @@ thumbnail/preview for an instant blurry frame, then swap in full-res.
 
 ## 4. Core viewer behavior
 
-- **Display:** decode → `SharedPixelBuffer` → `Image`. Initial `rotation-angle` set
-  from a cheap EXIF-orientation read so the first paint is correctly oriented.
+- **Display:** decode → `SharedPixelBuffer` → `Image`. Orientation is **normalized by
+  transforming the pixel buffer** (`image::imageops` rotate/flip) per the EXIF
+  Orientation value (1–8, including the mirrored variants), so the first paint is
+  correctly oriented and the zoom/pan math stays axis-aligned. (Note: Slint 1.16's
+  element rotation property is `transform-rotation`, **not** `rotation-angle` — the
+  Image-only property was generalized to `transform-*` in 1.14; we avoid relying on it
+  for orientation.)
 - **Zoom** (`↑`/`K`, `↓`/`J`, scrollwheel): a single `scale` property drives the
   `Image` `width`/`height` (= `natural_size * scale`); derived from one property to
   avoid binding loops (no transform matrix exists in Slint). ~1.25×/step, clamped
@@ -136,9 +141,10 @@ thumbnail/preview for an instant blurry frame, then swap in full-res.
   centered when smaller than viewport, clamped when larger.
 - **View-mode** (`Z`): state machine **Fit → 1:1 → last manual zoom**. Fit =
   `image-fit: contain` + `image-rendering: smooth`; 1:1/high-zoom = `pixelated`.
-- **Rotation** (`E` CCW, `R` CW): update `rotation-angle` instantly, then persist
-  losslessly via EXIF Orientation written async (atomic) with `little_exif`
-  (JPEG→APP1/Exif, WebP→RIFF `EXIF`, PNG→`eXIf`). **GIF: view-only**, resets on navigate.
+- **Rotation** (`E` CCW, `R` CW): rotates the displayed pixel buffer 90° for instant
+  feedback, then persists losslessly via the EXIF Orientation tag written async (atomic
+  temp-then-rename) with `little_exif` (JPEG→APP1/Exif, WebP→RIFF `EXIF`, PNG→`eXIf`).
+  **GIF: view-only**, resets on navigate.
 - **Navigation** (`←`/`H` prev, `→`/`L` next, wrap over natural-sorted dir set):
   instant if prefetched, else decode async; **reset view to Fit** for the new image;
   prefetch ±1 (maybe ±2) in the background.
@@ -331,7 +337,8 @@ search; multi-arg/glob nav sets; drag-and-drop; delete / open-with.
 | Crate | Purpose |
 |---|---|
 | `slint` (1.16+, `winit`+`FemtoVG`) | GUI / rendering |
-| `image` (image-rs) | **decode only** (RGBA8); never used to re-encode (it strips metadata) |
+| `image` (image-rs, 0.25) | **decode only** (RGBA8) + `imageops` orientation/rotate/downscale + animation frames; never used to re-encode (it strips metadata) |
+| `kamadak-exif` (0.6, as `exif`) | cheap EXIF **Orientation** read for correct first paint |
 | `img-parts` (0.4) | JPEG/PNG/WebP chunk/segment surgery for XMP injection (no re-encode) |
 | `xmp-writer` (0.3) | XMP packet serialization (`dc:subject`, `xmp:Rating`) |
 | `little_exif` | EXIF write (orientation + JPEG rating tag) |
