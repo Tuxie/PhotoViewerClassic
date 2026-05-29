@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 slint = { workspace = true }
 decode = { path = "../crates/decode" }
+imageset = { path = "../crates/imageset" }
 
 [build-dependencies]
 slint-build = { workspace = true }

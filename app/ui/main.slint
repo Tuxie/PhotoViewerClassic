@@ -9,10 +9,12 @@ export component AppWindow inherits Window {
     in property <string> status-text: "";
 
     callback quit();
+    callback next-image();
+    callback prev-image();
     forward-focus: keys;
 
     Rectangle {
-        clip: true;
+        clip: true;          // kept for the future pan/zoom task; harmless now
         width: 100%;
         height: 100%;
 
@@ -20,12 +22,11 @@ export component AppWindow inherits Window {
             source: root.current-image;
             width: 100%;
             height: 100%;
-            image-fit: contain;       // fit-to-window (default view); zoom comes in a later plan
+            image-fit: contain;
             image-rendering: smooth;
         }
     }
 
-    // Centered status message (errors / usage). Fills the window so centering works.
     Text {
         width: 100%;
         height: 100%;
@@ -36,7 +37,6 @@ export component AppWindow inherits Window {
         vertical-alignment: center;
     }
 
-    // Caption (filename), top-left. Plain white text for the foundation.
     Text {
         x: 8px;
         y: 8px;
@@ -49,6 +49,14 @@ export component AppWindow inherits Window {
         key-pressed(event) => {
             if (event.text == Key.Escape || event.text == "q" || event.text == "Q") {
                 root.quit();
+                return EventResult.accept;
+            }
+            if (event.text == Key.RightArrow || event.text == "l" || event.text == "L") {
+                root.next-image();
+                return EventResult.accept;
+            }
+            if (event.text == Key.LeftArrow || event.text == "h" || event.text == "H") {
+                root.prev-image();
                 return EventResult.accept;
             }
             return EventResult.reject;

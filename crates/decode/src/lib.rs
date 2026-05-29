@@ -1,5 +1,4 @@
-use std::fs::File;
-use std::io::BufReader;
+use std::io::Cursor;
 use std::path::Path;
 
 use image::imageops::{
@@ -13,15 +12,35 @@ pub fn decode_to_rgba8(path: &Path) -> image::ImageResult<RgbaImage> {
     Ok(ImageReader::open(path)?.with_guessed_format()?.decode()?.to_rgba8())
 }
 
-/// Read the EXIF Orientation tag (1..=8) if present, without decoding pixels.
-pub fn read_orientation(path: &Path) -> Option<u16> {
-    let mut reader = BufReader::new(File::open(path).ok()?);
-    let exif = exif::Reader::new().read_from_container(&mut reader).ok()?;
+/// Read the file once, decode to RGBA8, normalize EXIF orientation, and downscale
+/// so both sides are <= `max`. A single filesystem read serves BOTH the pixel
+/// decode and the EXIF orientation lookup (avoids opening the file twice).
+pub fn display_image(path: &Path, max: u32) -> image::ImageResult<RgbaImage> {
+    let bytes = std::fs::read(path)?;
+    let orientation = orientation_from_bytes(&bytes).unwrap_or(1);
+    let rgba = ImageReader::new(Cursor::new(bytes.as_slice()))
+        .with_guessed_format()?
+        .decode()?
+        .to_rgba8();
+    Ok(downscale_to_fit(apply_orientation(rgba, orientation), max))
+}
+
+/// EXIF Orientation (1..=8) parsed from in-memory image bytes, if present.
+fn orientation_from_bytes(bytes: &[u8]) -> Option<u16> {
+    let exif = exif::Reader::new()
+        .read_from_container(&mut Cursor::new(bytes))
+        .ok()?;
     let field = exif.get_field(exif::Tag::Orientation, exif::In::PRIMARY)?;
     match field.value.get_uint(0) {
         Some(v @ 1..=8) => Some(v as u16),
         _ => None,
     }
+}
+
+/// Read the EXIF Orientation tag (1..=8) from a file path, if present.
+pub fn read_orientation(path: &Path) -> Option<u16> {
+    let bytes = std::fs::read(path).ok()?;
+    orientation_from_bytes(&bytes)
 }
 
 /// Apply an EXIF orientation (1..=8) by transforming the pixel buffer.
@@ -128,5 +147,15 @@ mod tests {
         let small = RgbaImage::new(30, 20);
         let out2 = downscale_to_fit(small, 40);
         assert_eq!(out2.dimensions(), (30, 20));
+    }
+
+    #[test]
+    fn display_image_decodes_and_downscales() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.png");
+        image::RgbaImage::new(100, 50).save(&path).unwrap();
+        let out = display_image(&path, 40).unwrap();
+        assert!(out.width() <= 40 && out.height() <= 40);
+        assert_eq!(out.width(), 40); // limiting side hits max
     }
 }
