@@ -49,6 +49,8 @@ pub fn natural_cmp_ci(a: &str, b: &str) -> Ordering {
 }
 
 /// All supported image files directly in `dir`, natural-sorted by file name.
+/// Returns an empty `Vec` if the directory can't be read — errors are intentionally
+/// swallowed; callers treat "empty" as "nothing to show".
 pub fn scan_dir(dir: &Path) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = match std::fs::read_dir(dir) {
         Ok(rd) => rd
@@ -84,6 +86,7 @@ impl ImageSet {
 
     /// Scan the file's directory and position the cursor on that file.
     /// Falls back to a single-element set if the directory can't be scanned.
+    /// Path matching is byte-exact (no symlink / `..` canonicalization).
     pub fn from_file(path: &Path) -> Self {
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
         let files = scan_dir(dir);
@@ -101,17 +104,19 @@ impl ImageSet {
     /// 0-based index of the current cursor.
     pub fn position(&self) -> usize { self.idx }
 
+    #[must_use]
     pub fn current(&self) -> Option<PathBuf> { self.files.get(self.idx).cloned() }
 
-    /// Advance with wrap-around; returns the new current path.
-    pub fn next(&mut self) -> Option<PathBuf> {
+    /// Advance the cursor with wrap-around; returns the new current path.
+    /// Named `advance` (not `next`) to avoid shadowing `Iterator::next`.
+    pub fn advance(&mut self) -> Option<PathBuf> {
         if self.files.is_empty() { return None; }
         self.idx = (self.idx + 1) % self.files.len();
         self.current()
     }
 
-    /// Step back with wrap-around; returns the new current path.
-    pub fn prev(&mut self) -> Option<PathBuf> {
+    /// Step the cursor back with wrap-around; returns the new current path.
+    pub fn retreat(&mut self) -> Option<PathBuf> {
         if self.files.is_empty() { return None; }
         self.idx = (self.idx + self.files.len() - 1) % self.files.len();
         self.current()
@@ -151,10 +156,10 @@ mod tests {
         let mut set = ImageSet::new(files, 0);
         assert_eq!(set.len(), 3);
         assert_eq!(set.current(), Some(PathBuf::from("/d/a.jpg")));
-        assert_eq!(set.next(), Some(PathBuf::from("/d/b.jpg")));
-        assert_eq!(set.next(), Some(PathBuf::from("/d/c.jpg")));
-        assert_eq!(set.next(), Some(PathBuf::from("/d/a.jpg")));
-        assert_eq!(set.prev(), Some(PathBuf::from("/d/c.jpg")));
+        assert_eq!(set.advance(), Some(PathBuf::from("/d/b.jpg")));
+        assert_eq!(set.advance(), Some(PathBuf::from("/d/c.jpg")));
+        assert_eq!(set.advance(), Some(PathBuf::from("/d/a.jpg")));
+        assert_eq!(set.retreat(), Some(PathBuf::from("/d/c.jpg")));
     }
 
     #[test]
@@ -162,8 +167,8 @@ mod tests {
         let mut set = ImageSet::empty();
         assert!(set.is_empty());
         assert_eq!(set.current(), None);
-        assert_eq!(set.next(), None);
-        assert_eq!(set.prev(), None);
+        assert_eq!(set.advance(), None);
+        assert_eq!(set.retreat(), None);
     }
 
     #[test]
