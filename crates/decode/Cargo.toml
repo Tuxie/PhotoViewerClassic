@@ -1,0 +1,11 @@
+[package]
+name = "decode"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+image = { workspace = true }
+kamadak-exif = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
