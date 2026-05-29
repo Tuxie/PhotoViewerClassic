@@ -58,3 +58,7 @@ Minimal. Bottom toolbar with buttons for Previous, Next, Rotate Left, Rotate Rig
 - Pressing Down or Tab in the search field navigates to the match list, then Up/Down navigates entries. Space selects. Tab moves focus back to the search field. Enter saves. Esc cancels (confirm to discard if there were changes).
 - Tags are saved in `$PVC_HOME` (`%APPDATA%\PhotoViewerClassic` on Windows, `~/.config/pvc` on Linux and macOS) in the file `tags.txt` which contains all tags ever added.
 
+## Development rules
+
+- Sleeping and/or polling is absolutely forbidden in the happy path. It is only allowed when recovering after error situations. Emit and/or react to events, don't poll. This includes in tests.
+- The GUI must be snappy and responsive at all times. The GUI may not be sluggish just because something heavy is going on in the background.
