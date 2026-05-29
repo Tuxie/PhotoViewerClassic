@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: lint (fmt + clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      # clippy type-checks the winit/femtovg crates, so the X11/xkb/fontconfig
+      # dev headers are required even though no window is ever opened.
+      - name: Install Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libfontconfig-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      # Deny warnings only here (not via global RUSTFLAGS, which would bust the cache).
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  build-test:
+    name: build-test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Don't let a Windows image regression cancel the green Linux/macOS legs.
+      fail-fast: false
+      matrix:
+        # -latest aliases track the newest stable runners (macOS = Apple Silicon,
+        # Windows = MSVC). Neither needs extra system deps for the pure-Rust
+        # winit+femtovg stack.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libfontconfig-dev
+      - uses: Swatinem/rust-cache@v2
+      # Build + test only — never launch the GUI. The app crate has no tests; the
+      # 14 tests live in the pure-logic imageset/decode crates. A windowed test
+      # would fail headless on Windows (stock opengl32 is GL 1.1) and need xvfb on Linux.
+      - name: build
+        run: cargo build --workspace --verbose
+      - name: test
+        run: cargo test --workspace --verbose
