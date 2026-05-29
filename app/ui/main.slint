@@ -4,8 +4,46 @@ export component AppWindow inherits Window {
     preferred-width: 1024px;
     preferred-height: 768px;
 
+    in property <image> current-image;
+    in property <string> caption: "";
+    in property <string> status-text: "";
+
     callback quit();
     forward-focus: keys;
+
+    Rectangle {
+        clip: true;
+        width: 100%;
+        height: 100%;
+
+        Image {
+            source: root.current-image;
+            width: 100%;
+            height: 100%;
+            image-fit: contain;       // fit-to-window (default view); zoom comes in a later plan
+            image-rendering: smooth;
+        }
+    }
+
+    // Centered status message (errors / usage). Fills the window so centering works.
+    Text {
+        width: 100%;
+        height: 100%;
+        text: root.status-text;
+        visible: root.status-text != "";
+        color: white;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    // Caption (filename), top-left. Plain white text for the foundation.
+    Text {
+        x: 8px;
+        y: 8px;
+        text: root.caption;
+        color: white;
+        visible: root.caption != "";
+    }
 
     keys := FocusScope {
         key-pressed(event) => {
