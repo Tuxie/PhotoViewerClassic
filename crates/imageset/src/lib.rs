@@ -188,4 +188,12 @@ mod tests {
         assert_eq!(set.len(), 3);
         assert_eq!(set.position(), 1);
     }
+
+    #[test]
+    fn single_image_nav_stays_put() {
+        let mut set = ImageSet::new(vec![PathBuf::from("/d/only.jpg")], 0);
+        assert_eq!(set.advance(), Some(PathBuf::from("/d/only.jpg"))); // wraps to itself
+        assert_eq!(set.retreat(), Some(PathBuf::from("/d/only.jpg")));
+        assert_eq!(set.position(), 0);
+    }
 }
