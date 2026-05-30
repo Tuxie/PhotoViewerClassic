@@ -16,6 +16,14 @@ export component AppWindow inherits Window {
     in property <bool> smooth: true;
     in property <float> zoom-percent;
 
+    // Info overlay (I key). `info-visible` is in-out so Esc can clear it from Slint too.
+    in-out property <bool> info-visible;
+    in property <string> info-name;
+    in property <string> info-path;
+    in property <string> info-dims;          // e.g. "1920 × 1080"
+    in property <string> info-size;          // e.g. "2.3 MB"
+    in property <int> rotation-degrees;
+
     // Keyboard view-control steps. `zoom-step` mirrors viewstate::ZOOM_STEP (the Rust
     // const can't be imported into Slint); `pan-step` is the Shift+arrow nudge distance.
     property <float> zoom-step: 1.25;
@@ -102,13 +110,65 @@ export component AppWindow inherits Window {
         visible: root.caption != "";
     }
 
+    // Info overlay, top-left and offset below the caption so the two don't collide.
+    // Sits above the image/viewport in z-order; can sit below a future toolbar (Task 9).
+    info-panel := Rectangle {
+        x: 8px;
+        y: 32px;
+        visible: root.info-visible;
+        background: #000000cc;
+        border-radius: 6px;
+        width: info-layout.preferred-width;
+        height: info-layout.preferred-height;
+
+        info-layout := VerticalLayout {
+            padding: 10px;
+            spacing: 4px;
+
+            Text {
+                text: "Name: " + root.info-name;
+                color: white;
+            }
+            Text {
+                text: "Path: " + root.info-path;
+                color: white;
+            }
+            Text {
+                text: "Size: " + root.info-dims;
+                color: white;
+            }
+            Text {
+                text: "File size: " + root.info-size;
+                color: white;
+            }
+            Text {
+                text: "Zoom: \{root.zoom-percent}%";
+                color: white;
+            }
+            Text {
+                text: "Rotation: \{root.rotation-degrees}°";
+                color: white;
+            }
+            // Rating/tags intentionally omitted — they arrive with the metadata plan (Plan 3).
+        }
+    }
+
     keys := FocusScope {
         // Pan convention: a Shift+arrow nudges the image in the direction the arrow
         // points (Shift+Left moves the image right, i.e. reveals its left edge);
         // ViewState clamps so over-panning is harmless.
         key-pressed(event) => {
-            if (event.text == Key.Escape || event.text == "q" || event.text == "Q") {
+            // Q always quits. Esc closes the info overlay if it's open, otherwise quits.
+            if (event.text == "q" || event.text == "Q") {
                 root.quit();
+                return EventResult.accept;
+            }
+            if (event.text == Key.Escape) {
+                if (root.info-visible) {
+                    root.info-visible = false;
+                } else {
+                    root.quit();
+                }
                 return EventResult.accept;
             }
             if (event.modifiers.shift) {

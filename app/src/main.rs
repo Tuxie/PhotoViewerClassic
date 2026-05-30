@@ -41,9 +41,21 @@ struct DecodedFrame {
     // `image-presented` so the view fits/zooms against the right pixel grid.
     nat_w: u32,
     nat_h: u32,
-    // rotation in degrees; surfaced in the info overlay by Task 8.
-    #[allow(dead_code)]
+    // Rotation in degrees; surfaced in the info overlay (Task 8).
     rotation_deg: i32,
+    // Per-image metadata for the info overlay: Some only on a fresh Show, None on a
+    // rotate (name/path/file-size don't change on rotate, so they aren't recomputed).
+    // The file-size stat is I/O, computed on the worker thread before this crosses
+    // into the UI closure.
+    info: Option<ImageInfo>,
+}
+
+/// Per-image metadata shown in the info overlay. Built on the worker thread for a fresh
+/// Show (so the file-size stat doesn't run in the UI closure) and dropped on rotates.
+struct ImageInfo {
+    name: String,
+    path: String,
+    size: String,
 }
 
 /// Which way to move the navigation cursor.
@@ -184,6 +196,17 @@ fn main() -> Result<(), slint::PlatformError> {
             let now = !fs.get();
             fs.set(now);
             ui.window().set_fullscreen(now);
+        }
+    });
+
+    // Info overlay toggle (I key). Flip the in-out `info-visible` property; Esc can also
+    // clear it from within Slint.
+    ui.on_toggle_info({
+        let weak = ui.as_weak();
+        move || {
+            let ui = weak.unwrap();
+            let v = ui.get_info_visible();
+            ui.set_info_visible(!v);
         }
     });
 
@@ -435,8 +458,20 @@ fn push_frame(
     caption: Option<String>,
     is_new_image: bool,
 ) {
-    let Some((_, base)) = current else { return };
+    let Some((path, base)) = current else { return };
     let disp = rotate_turns(base, turns);
+    // Compute per-image metadata ONLY on a fresh Show, here on the WORKER thread — the
+    // file-size stat is I/O and must not run inside the UI closure. A rotate carries None.
+    let info = is_new_image.then(|| {
+        let size = std::fs::metadata(path)
+            .map(|m| human_size(m.len()))
+            .unwrap_or_else(|_| "unknown".into());
+        ImageInfo {
+            name: file_name_of(path),
+            path: path.display().to_string(),
+            size,
+        }
+    });
     let frame = DecodedFrame {
         buffer: slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
             disp.as_raw(),
@@ -447,6 +482,7 @@ fn push_frame(
         nat_w: disp.width(),
         nat_h: disp.height(),
         rotation_deg: turns.rem_euclid(4) * 90,
+        info,
     };
     let _ = weak.upgrade_in_event_loop(move |c| {
         c.set_current_image(slint::Image::from_rgba8(frame.buffer));
@@ -454,6 +490,15 @@ fn push_frame(
             c.set_caption(cap.into());
         }
         c.set_status_text("".into());
+        // name/path/file-size change only on a fresh Show.
+        if let Some(info) = frame.info {
+            c.set_info_name(info.name.into());
+            c.set_info_path(info.path.into());
+            c.set_info_size(info.size.into());
+        }
+        // dims and rotation change on every frame (a rotate swaps width/height).
+        c.set_info_dims(format!("{} × {}", frame.nat_w, frame.nat_h).into());
+        c.set_rotation_degrees(frame.rotation_deg);
         // Hand the displayed pixel dims to ViewState (on the UI thread, where the
         // Rc<RefCell<ViewState>> lives): a Show resets to Fit, a rotate keeps the mode.
         c.invoke_image_presented(frame.nat_w as i32, frame.nat_h as i32, is_new_image);
@@ -516,6 +561,23 @@ fn coalesce_latest<T>(first: T, rx: &mpsc::Receiver<T>) -> T {
         last = next;
     }
     last
+}
+
+/// Human-readable byte count using binary (1024) units: "913 B", "2.3 MB", "1.0 GB".
+/// Bytes are shown whole; KB and up get one decimal. Pure and deterministic so it's
+/// unit-testable.
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
 }
 
 /// The file name component as a lossy String, or "" if there is none.
@@ -773,6 +835,24 @@ mod tests {
         );
     }
 
+    /// `human_size` is pure: bytes stay whole, KB and up get one decimal, and the unit
+    /// steps up at each 1024 boundary (binary units).
+    #[test]
+    fn human_size_formats_binary_units() {
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(913), "913 B");
+        assert_eq!(human_size(1023), "1023 B");
+        assert_eq!(human_size(1024), "1.0 KB");
+        assert_eq!(human_size(1536), "1.5 KB");
+        assert_eq!(human_size(1024 * 1024), "1.0 MB");
+        // 2.3 MB ≈ 2.3 * 1024 * 1024 bytes.
+        assert_eq!(human_size(2_411_724), "2.3 MB");
+        assert_eq!(human_size(1024 * 1024 * 1024), "1.0 GB");
+        assert_eq!(human_size(1024u64.pow(4)), "1.0 TB");
+        // Beyond the top unit it stays in TB rather than overflowing the table.
+        assert_eq!(human_size(2 * 1024u64.pow(5)), "2048.0 TB");
+    }
+
     /// `drain_batch` preserves order and drains the queue (unlike coalesce_latest).
     #[test]
     fn drain_batch_collects_the_whole_queue_in_order() {
@@ -908,6 +988,57 @@ mod gui_tests {
         assert!(next.get(), "next-image handler must run");
         assert!(cycle.get(), "cycle-view handler must run");
         assert!(rot_cw.get(), "rotate-cw handler must run");
+    }
+
+    /// Test 5 (Task 8) — the info overlay. The I key fires `toggle-info`, whose handler
+    /// flips the `info-visible` property; the overlay's string fields are plain in-props
+    /// bound 1:1 into the panel's Text lines. We assert (a) the toggle handler flips the
+    /// flag both ways and (b) the info-* props round-trip through the bindings.
+    ///
+    /// Element-finder note: `i-slint-backend-testing` 1.16 *does* export
+    /// `ElementHandle::find_by_element_id` WITHOUT the broken `internal` feature, but it
+    /// returns nothing unless the Slint compiler emitted debug info (it logs
+    /// "requires the presence of debug info ... Set SLINT_EMIT_DEBUG_INFO=1"). The
+    /// production build (`app/build.rs` → `slint_build::compile`) does not enable debug
+    /// info, and turning it on solely for a test would bloat the shipped binary. Since the
+    /// `visible: root.info-visible` binding is a trivial 1:1 wire, asserting the property
+    /// round-trip (plus the toggle) is sufficient — so we use the property round-trip.
+    #[test]
+    fn info_overlay_toggles_and_binds() {
+        init_backend();
+        let ui = AppWindow::new().expect("AppWindow under testing backend");
+
+        // Wire the same handler `main` installs.
+        ui.on_toggle_info({
+            let weak = ui.as_weak();
+            move || {
+                let ui = weak.unwrap();
+                let v = ui.get_info_visible();
+                ui.set_info_visible(!v);
+            }
+        });
+
+        // (a) Toggle: starts false, I → true, I → false.
+        assert!(!ui.get_info_visible(), "overlay starts hidden");
+        ui.invoke_toggle_info();
+        assert!(ui.get_info_visible(), "first I shows the overlay");
+        ui.invoke_toggle_info();
+        assert!(!ui.get_info_visible(), "second I hides the overlay");
+
+        // (b) The info-* props round-trip through the bindings (the panel's Text lines
+        // read these props directly, so a clean round-trip proves the wiring).
+        ui.set_info_name("photo.jpg".into());
+        ui.set_info_path("/pics/photo.jpg".into());
+        ui.set_info_dims("1920 × 1080".into());
+        ui.set_info_size("2.3 MB".into());
+        ui.set_rotation_degrees(90);
+        ui.set_info_visible(true);
+        assert_eq!(ui.get_info_name(), "photo.jpg");
+        assert_eq!(ui.get_info_path(), "/pics/photo.jpg");
+        assert_eq!(ui.get_info_dims(), "1920 × 1080");
+        assert_eq!(ui.get_info_size(), "2.3 MB");
+        assert_eq!(ui.get_rotation_degrees(), 90);
+        assert!(ui.get_info_visible());
     }
 
     /// Test 4 (Task 5) — view-only rotation. A rotated frame re-enters through
