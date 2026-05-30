@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["app", "crates/imageset", "crates/decode", "crates/viewstate"]
+members = ["app", "crates/imageset", "crates/decode", "crates/viewstate", "crates/config"]
 
 [workspace.dependencies]
 slint = { version = "1.16", default-features = false, features = [
@@ -13,6 +13,8 @@ slint-build = "1.16"
 # Re-list jpeg/png explicitly (they are dropped without default features).
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 kamadak-exif = "0.6"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 
 [profile.release]
 opt-level = "z"
