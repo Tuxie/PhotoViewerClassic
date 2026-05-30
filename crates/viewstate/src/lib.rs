@@ -45,6 +45,8 @@ impl ViewState {
         }
     }
 
+    /// Updates the viewport size. Pan is reset to (0,0); callers that want to
+    /// preserve pan across resizes must save and restore it themselves.
     pub fn set_viewport(&mut self, w: f32, h: f32) {
         self.vp_w = w;
         self.vp_h = h;
@@ -52,6 +54,8 @@ impl ViewState {
         self.pan_y = 0.0;
     }
 
+    /// Call when the displayed image *changes* (navigation): resets to Fit,
+    /// clears pan and the remembered manual zoom.
     pub fn load(&mut self, nat_w: f32, nat_h: f32) {
         self.nat_w = nat_w;
         self.nat_h = nat_h;
@@ -61,6 +65,8 @@ impl ViewState {
         self.last_manual = None;
     }
 
+    /// Call when the natural dimensions change but the *same* image is shown
+    /// (e.g. a 90° rotation): keeps the current mode and manual zoom, recenters pan.
     pub fn set_natural(&mut self, nat_w: f32, nat_h: f32) {
         self.nat_w = nat_w;
         self.nat_h = nat_h;
@@ -81,6 +87,10 @@ impl ViewState {
             ViewMode::OneToOne => 1.0,
             ViewMode::Manual => self.manual_scale,
         }
+    }
+
+    pub fn mode(&self) -> ViewMode {
+        self.mode
     }
 
     fn axis(vp: f32, len: f32, pan: f32) -> f32 {
@@ -147,7 +157,9 @@ impl ViewState {
     }
 
     pub fn zoom_percent(&self) -> u32 {
-        (self.scale() * 100.0).round() as u32
+        // scale() is always within [MIN_SCALE, MAX_SCALE] = [0.05, 32.0], so the
+        // cast is non-negative and in range; max(0.0) guards future refactors.
+        (self.scale() * 100.0).round().max(0.0) as u32
     }
 }
 
@@ -320,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn cycle_mode_fit_to_onetone_to_manual_to_fit_when_last_manual_some() {
+    fn cycle_mode_fit_to_onetoone_to_manual_to_fit_when_last_manual_some() {
         let mut vs = ViewState::new();
         vs.set_viewport(400.0, 300.0);
         vs.load(100.0, 100.0);
@@ -376,6 +388,19 @@ mod tests {
         // Manual scale 1.25 → 125%
         vs.zoom_center(1.25);
         assert_eq!(vs.zoom_percent(), 125);
+    }
+
+    #[test]
+    fn zoom_step_constant_compounds() {
+        // Five ZOOM_STEP zoom-ins compound multiplicatively from the fit scale.
+        let mut vs = ViewState::new();
+        vs.set_viewport(400.0, 400.0);
+        vs.load(100.0, 100.0); // fit scale = 4.0
+        let start = vs.scale();
+        for _ in 0..5 {
+            vs.zoom_center(ZOOM_STEP);
+        }
+        assert!(approx_eq(vs.scale(), start * ZOOM_STEP.powi(5)));
     }
 
     #[test]
