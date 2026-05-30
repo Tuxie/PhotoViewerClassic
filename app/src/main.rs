@@ -793,4 +793,58 @@ mod gui_tests {
         assert!(cycle.get(), "cycle-view handler must run");
         assert!(rot_cw.get(), "rotate-cw handler must run");
     }
+
+    /// Test 4 (Task 5) — view-only rotation. A rotated frame re-enters through
+    /// `image-presented` with `is_new = false`, which must KEEP the current zoom/mode
+    /// (via `set_natural`) while refitting to the swapped dimensions; a subsequent Show
+    /// (navigation, `is_new = true`) must RESET to Fit. This is the end-to-end contract
+    /// of E/R rotation: zoom survives a rotate but not a navigate.
+    #[test]
+    fn rotation_keeps_zoom_then_navigation_resets_it() {
+        init_backend();
+        let ui = AppWindow::new().expect("AppWindow under testing backend");
+        let vs = Rc::new(RefCell::new(viewstate::ViewState::new()));
+        attach_view_handlers(&ui, &vs);
+
+        // Present a 400x200 image (new) in an 800x600 viewport → Fit, 200%.
+        ui.invoke_viewport_changed(800.0, 600.0);
+        ui.invoke_image_presented(400, 200, true);
+        // Zoom into Manual mode (scale 4.0 → 400%).
+        ui.invoke_zoom_by(2.0, 400.0, 300.0);
+        assert_eq!(ui.get_zoom_percent(), 400.0);
+        assert_eq!(vs.borrow().mode(), viewstate::ViewMode::Manual);
+
+        // Rotate 90°: the worker pushes the swapped dims (200x400) with is_new = false.
+        // Zoom scale and mode must be preserved; geometry refits to the new aspect.
+        ui.invoke_image_presented(200, 400, false);
+        assert_eq!(
+            vs.borrow().mode(),
+            viewstate::ViewMode::Manual,
+            "rotation must keep the view mode"
+        );
+        assert_eq!(
+            ui.get_zoom_percent(),
+            400.0,
+            "rotation must keep the zoom scale"
+        );
+        let g = vs.borrow().geometry();
+        assert_eq!(
+            (ui.get_disp_w(), ui.get_disp_h()),
+            (g.w, g.h),
+            "disp-* must track the rotated geometry"
+        );
+
+        // Navigate to a fresh image (is_new = true) → back to Fit (200%).
+        ui.invoke_image_presented(400, 200, true);
+        assert_eq!(
+            vs.borrow().mode(),
+            viewstate::ViewMode::Fit,
+            "navigation must reset the view mode"
+        );
+        assert_eq!(
+            ui.get_zoom_percent(),
+            200.0,
+            "navigation must reset the zoom"
+        );
+    }
 }
