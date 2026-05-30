@@ -11,8 +11,11 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+
+use glow::HasContext;
 
 /// One unit of work for the foreground decode worker.
 enum Job {
@@ -39,6 +42,31 @@ struct Cached {
 /// foreground worker (on a cache miss) and the prefetch worker (neighbors). Bounded by
 /// the prefetch worker to the current keep-set (~3 entries) so memory stays flat.
 type Cache = Arc<Mutex<HashMap<PathBuf, Cached>>>;
+
+/// GPU GL_MAX_TEXTURE_SIZE, 0 until read at renderer setup.
+type TexLimit = Arc<AtomicU32>;
+
+/// Clamp a requested decode cap to the GPU texture limit (0 = unknown → no clamp).
+fn clamp_cap(requested: u32, limit: &TexLimit) -> u32 {
+    match limit.load(Ordering::Relaxed) {
+        0 => requested,
+        m => requested.min(m),
+    }
+}
+
+/// Backstop: downscale a buffer to the GPU texture limit if it exceeds it — for a decode
+/// that ran before the limit was known (the cold first image). No-op when within/unknown.
+fn clamp_to_texture_limit(img: Arc<image::RgbaImage>, limit: &TexLimit) -> Arc<image::RgbaImage> {
+    let m = limit.load(Ordering::Relaxed);
+    if m == 0 {
+        return img;
+    }
+    let (w, h) = img.dimensions();
+    if w <= m && h <= m {
+        return img;
+    }
+    Arc::new(decode::downscale_to_fit((*img).clone(), m))
+}
 
 /// A frame ready for the UI: the displayed (already-rotated) pixels plus the metadata
 /// Task 4 will surface (natural dims of the displayed buffer and rotation in degrees).
@@ -166,9 +194,10 @@ fn main() -> Result<(), slint::PlatformError> {
     // push, which we deliver right after AppWindow::new().
     let plan = imageset::DEFAULT_PLAN;
     let cache: Cache = Arc::new(Mutex::new(HashMap::new()));
+    let tex_limit: TexLimit = Arc::new(AtomicU32::new(0));
     let (weak_tx, weak_rx) = mpsc::channel::<slint::Weak<AppWindow>>();
-    let decode_tx = spawn_decode_worker(weak_rx, cache.clone(), plan);
-    let prefetch_tx = spawn_prefetch_worker(cache.clone());
+    let decode_tx = spawn_decode_worker(weak_rx, cache.clone(), plan, tex_limit.clone());
+    let prefetch_tx = spawn_prefetch_worker(cache.clone(), tex_limit.clone());
     let nav = Arc::new(Mutex::new(imageset::ImageSet::empty()));
 
     // Dispatch the cold image's decode now (no `ui` needed) so it overlaps the UI setup
@@ -188,6 +217,28 @@ fn main() -> Result<(), slint::PlatformError> {
     // Hand the UI handle to the decode worker; it's been blocked on this since its first
     // push of the cold frame.
     let _ = weak_tx.send(ui.as_weak());
+
+    // Read GL_MAX_TEXTURE_SIZE once at renderer setup and publish it to the workers, so
+    // decodes are clamped to what the GPU can sample — femtovg renders an oversize texture
+    // as a SILENT black frame. RenderingSetup fires once before the first paint; the cold
+    // decode that ran before this is corrected by the push-time backstop in `push_frame`.
+    {
+        let tex_limit = tex_limit.clone();
+        let _ = ui.window().set_rendering_notifier(move |state, api| {
+            if let (
+                slint::RenderingState::RenderingSetup,
+                slint::GraphicsAPI::NativeOpenGL { get_proc_address },
+            ) = (state, api)
+            {
+                // SAFETY: GL context is current during RenderingSetup; read-only query only.
+                let limit = unsafe {
+                    let gl = glow::Context::from_loader_function_cstr(|s| get_proc_address(s));
+                    gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE)
+                };
+                tex_limit.store(limit.max(0) as u32, Ordering::Relaxed);
+            }
+        });
+    }
 
     // UI-thread fullscreen flag. We use the public `window().set_fullscreen(bool)` API
     // (i-slint-core 1.16): it backs the `Window`'s `full-screen` in-property and calls
@@ -481,6 +532,7 @@ fn spawn_decode_worker(
     weak_rx: mpsc::Receiver<slint::Weak<AppWindow>>,
     cache: Cache,
     plan: imageset::PrefetchPlan,
+    limit: TexLimit,
 ) -> mpsc::Sender<Job> {
     let (tx, rx) = mpsc::channel::<Job>();
     std::thread::spawn(move || {
@@ -508,16 +560,17 @@ fn spawn_decode_worker(
                 Some(first) => {
                     let (show, delta) = reduce_batch(drain_batch(first, &rx));
                     if let Some((path, caption)) = show {
+                        let eff_full = clamp_cap(plan.full_cap, &limit);
                         pending_upgrade = None; // a fresh Show cancels any pending upgrade
-                        let base = match resolve_show(&cache, &path, plan.full_cap) {
+                        let base = match resolve_show(&cache, &path, eff_full) {
                             ShowSource::Full(b) => b,
                             ShowSource::Preview(b) => {
                                 pending_upgrade = Some(path.clone());
                                 b
                             }
                             ShowSource::Miss => {
-                                match obtain_base(&cache, &path, plan.full_cap, |p| {
-                                    decode::display_image(p, plan.full_cap)
+                                match obtain_base(&cache, &path, eff_full, |p| {
+                                    decode::display_image(p, eff_full)
                                 }) {
                                     Ok(b) => b,
                                     Err(e) => {
@@ -532,24 +585,25 @@ fn spawn_decode_worker(
                         current = Some((path, base));
                         turns = 0;
                         let w = weak.get_or_insert_with(|| weak_rx.recv().expect("UI handle"));
-                        push_frame(w, &current, turns, caption, true);
+                        push_frame(w, &current, turns, caption, true, &limit);
                     }
                     if delta != 0 && current.is_some() {
                         turns = (turns + delta).rem_euclid(4);
                         let w = weak.get_or_insert_with(|| weak_rx.recv().expect("UI handle"));
-                        push_frame(w, &current, turns, None, false);
+                        push_frame(w, &current, turns, None, false, &limit);
                     }
                 }
                 None => {
                     // Idle + pending upgrade: decode the full and swap it in (re-applying turns).
                     let path = pending_upgrade.take().expect("pending upgrade present");
-                    if let Ok(b) = obtain_base(&cache, &path, plan.full_cap, |p| {
-                        decode::display_image(p, plan.full_cap)
+                    let eff_full = clamp_cap(plan.full_cap, &limit);
+                    if let Ok(b) = obtain_base(&cache, &path, eff_full, |p| {
+                        decode::display_image(p, eff_full)
                     }) {
                         if current.as_ref().is_some_and(|(p, _)| *p == path) {
                             current = Some((path, b));
                             let w = weak.get_or_insert_with(|| weak_rx.recv().expect("UI handle"));
-                            push_frame(w, &current, turns, None, false); // is_new=false → keeps zoom; re-applies turns
+                            push_frame(w, &current, turns, None, false, &limit); // is_new=false → keeps zoom; re-applies turns
                         }
                     }
                 }
@@ -569,9 +623,10 @@ fn push_frame(
     turns: i32,
     caption: Option<String>,
     is_new_image: bool,
+    limit: &TexLimit,
 ) {
     let Some((path, base)) = current else { return };
-    let disp = rotate_turns(base, turns);
+    let disp = clamp_to_texture_limit(rotate_turns(base, turns), limit);
     // Compute per-image metadata ONLY on a fresh Show, here on the WORKER thread — the
     // file-size stat is I/O and must not run inside the UI closure. A rotate carries None.
     let info = is_new_image.then(|| {
@@ -623,20 +678,21 @@ fn push_frame(
 /// decoded and inserted; any entry whose key is NOT in the keep-set is dropped, bounding
 /// the cache to ~3 entries. Errors for a neighbor are skipped silently (a broken file
 /// must not crash the prefetcher).
-fn spawn_prefetch_worker(cache: Cache) -> mpsc::Sender<Vec<(PathBuf, u32)>> {
+fn spawn_prefetch_worker(cache: Cache, limit: TexLimit) -> mpsc::Sender<Vec<(PathBuf, u32)>> {
     let (tx, rx) = mpsc::channel::<Vec<(PathBuf, u32)>>();
     std::thread::spawn(move || {
         while let Ok(first) = rx.recv() {
             let keep = coalesce_latest(first, &rx);
             for (path, cap) in &keep {
-                let have = cache.lock().unwrap().get(path).is_some_and(|c| c.cap >= *cap);
+                let cap = clamp_cap(*cap, &limit);
+                let have = cache.lock().unwrap().get(path).is_some_and(|c| c.cap >= cap);
                 if have {
                     continue;
                 }
-                if let Ok(rgba) = decode::display_image(path, *cap) {
+                if let Ok(rgba) = decode::display_image(path, cap) {
                     cache.lock().unwrap().insert(
                         path.clone(),
-                        Cached { buffer: Arc::new(rgba), cap: *cap },
+                        Cached { buffer: Arc::new(rgba), cap },
                     );
                 }
             }

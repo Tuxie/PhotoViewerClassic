@@ -13,6 +13,10 @@ slint = { workspace = true }
 # view-only quarter-turn rotations (`image::imageops::rotate90/180/270`). Pinned
 # decode-only by the workspace (no AVIF/TIFF/rayon).
 image = { workspace = true }
+# Read GL_MAX_TEXTURE_SIZE at renderer setup (via the rendering notifier) so decodes are
+# clamped to the GPU limit — femtovg renders an oversize texture as a silent black frame.
+# Matches femtovg 0.23.2's `glow ^0.17` so a single glow stays in the tree.
+glow = "0.17"
 decode = { path = "../crates/decode" }
 imageset = { path = "../crates/imageset" }
 viewstate = { path = "../crates/viewstate" }
