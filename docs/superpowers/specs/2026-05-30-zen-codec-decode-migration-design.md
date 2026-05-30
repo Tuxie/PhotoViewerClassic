@@ -45,9 +45,19 @@ distribution in some jurisdictions, flagged for Phase 2.
 - Decode JPEG, PNG, WebP, GIF (Phase 1) and HEIC/HEIF + AVIF (Phase 2) via `zen*`/`heic`.
 - Keep `crates/decode`'s public API and behavior identical, so **`app/src/main.rs` does
   not change**.
-- Preserve PVC's core principle: fast, deterministic cold start; single decode worker +
-  single prefetch worker; **no rayon / no polling**.
-- Remain pure-Rust with **no C toolchain** on the default build path.
+- **Fast cold start via parallel decode** — this is the primary motivation for the
+  migration. Enable the `zen*` single-image parallel decode (`parallel`/rayon) so the
+  first image decodes across all cores. Cold-start time-to-first-display is the most
+  important benchmark for this app.
+- Preserve PVC's *application-level* concurrency model: **single foreground decode worker +
+  single prefetch worker; no polling.** rayon operates *inside* a single decode
+  (intra-decode parallelism), which is orthogonal to — and complementary with — the
+  one-decode-at-a-time worker model. At cold start only the foreground decode runs, so it
+  gets every core. (The macOS blowup that motivated the single-worker model was
+  thread-*per-navigation-keypress* spawning many whole decodes at once — a different axis
+  that the worker model still prevents; rayon does not re-introduce it.)
+- Remain pure-Rust with **no C toolchain** on the default build path. (rayon is pure-Rust;
+  it does not pull a C toolchain.)
 - Keep the codebase honest: real fixture-based decode tests; updated docs.
 
 ## Non-goals
@@ -56,9 +66,7 @@ distribution in some jurisdictions, flagged for Phase 2.
   are decode-only; writing needs separate permissive crates (`img-parts` + `little_exif`)
   and is realistically JPEG-only for the Windows indexer. Tracked separately as the
   "Plan 3 metadata" workstream; this spec does not touch it.
-- **Decode speed as a justification.** The `parallel`/rayon features stay OFF (they fight
-  the single-worker model and the win is conditional; ARM is scalar in zenjpeg today).
-  Speed is not a deliverable here; parity and format coverage are.
+- *(Decode speed is a primary GOAL, not a non-goal — see Goals. `parallel`/rayon is ON.)*
 - **Replacing `fast_image_resize`, `kamadak-exif`, or `image::imageops` rotation.** They
   stay.
 - **Removing `image` entirely.** It is retained as the buffer/rotation library (codec
@@ -119,17 +127,18 @@ except its `SUPPORTED` list in Phase 2) are unchanged.
 
 ## Dependencies & feature flags
 
-`crates/decode/Cargo.toml`:
+The table below lists the crates added to `crates/decode/Cargo.toml` and the feature
+flags to enable/disable. Phase 1 crates first, Phase 2 after.
 
 | Crate | Phase | Features ON | Features OFF / avoided |
 |---|---|---|---|
 | `zencodec` | 1 | (default traits + `ImageFormatRegistry`) | — |
 | `zenpixels` | 1 | `rgb` (for `to_rgba8`) | — |
-| `zenjpeg` | 1 | `decoder`, `zencodec` | `parallel`/rayon, encoder-side (`trellis`, `ultrahdr`), `lcms2`(C) |
-| `zenpng` | 1 | decode + `zencodec` | encode, `imagequant`(C) |
-| `zenwebp` | 1 | decode + `zencodec` | encode |
+| `zenjpeg` | 1 | `decoder`, `zencodec`, **`parallel`** | encoder-side (`trellis`, `ultrahdr`), `lcms2`(C) |
+| `zenpng` | 1 | decode + `zencodec` (+ `parallel` if exposed) | encode, `imagequant`(C) |
+| `zenwebp` | 1 | decode + `zencodec` (+ `parallel` if exposed) | encode |
 | `zengif` | 1 | decode + `zencodec` | encode |
-| `heic` (HEIC/HEIF) | 2 | `backend-rust` | `parallel`/rayon, native backends (`backend-mediafoundation` etc.) |
+| `heic` | 2 | `backend-rust`, **`parallel`** | native backends (`backend-mediafoundation` etc.) |
 | `zenavif` (standalone `.avif`) | 2 | decode + `zencodec` | `unsafe-asm`, rav1d-safe `asm`/`partial_asm`/`c-ffi` |
 
 AVIF decoder choice: use the **dedicated `zenavif`** crate for standalone `.avif` files
@@ -141,11 +150,18 @@ Workspace `Cargo.toml`: the `image` dependency becomes `default-features = false
 **no codec features** (retained only for `RgbaImage`/`RgbImage`/`imageops`). `kamadak-exif`
 and `fast_image_resize` stay.
 
-- **rayon stays out entirely.** No `parallel` feature on any crate. Preserves the
-  single-worker model and cold-start determinism.
+- **rayon is ON** via each decoder's `parallel` feature — this is the migration's primary
+  motivation (parallel single-image decode for fast cold start). It provides intra-decode
+  parallelism beneath the unchanged single-foreground + single-prefetch worker model. rayon
+  uses a bounded global pool (it work-steals; it does **not** spawn a thread per decode), so
+  it cannot recreate the old thread-per-keypress blowup. Note both workers could decode
+  concurrently (foreground current + prefetch neighbor) and would share rayon's pool — fine,
+  but a later refinement may scope/cap the pool if prefetch is found to steal cores from a
+  foreground decode; not a launch concern.
 - **Exact-pinned versions** (e.g. `zenjpeg = "=0.8.3"`, `heic = "=0.1.6"`), `Cargo.lock`
   committed. Pre-1.0 + known yank history → no surprise minor bumps.
 - **No C toolchain** on the default path (avoid `imagequant`, `lcms2`, rav1d-safe asm/ffi).
+  rayon is pure-Rust and does not change this.
 - **MSRV floor rises to 1.93** (zenjpeg). CI must pin ≥1.93; the README already states
   Rust 1.96+, so this is satisfied. Verify with `act` (per memory `verify-ci-with-act-before-push`).
 - **Encoder footprint:** where a crate has no decode-only switch, rely on
@@ -160,18 +176,28 @@ under the chosen feature set.
 ## Phasing
 
 ### Phase 1 — engine swap, behavioral parity (JPEG/PNG/WebP/GIF)
-Replace decoding for today's four formats. `imageset::SUPPORTED` unchanged. The deferred
-RGB-downscale path is preserved. **Done when:** the decode crate's orientation/resize tests
-pass unchanged, new fixture-based decode tests pass against the zen decoders, the full
-workspace test suite is green, and the app shows the same images as before (manual check on
-a sample folder). No `main.rs` changes.
+Replace decoding for today's four formats, with `parallel`/rayon ON. `imageset::SUPPORTED`
+unchanged. The deferred RGB-downscale path is preserved. **Done when:** the decode crate's
+orientation/resize tests pass unchanged, new fixture-based decode tests pass against the zen
+decoders, the full workspace test suite is green, the app shows the same images as before
+(manual check on a sample folder), **and the cold-start benchmark below confirms the
+parallel-decode win.** No `main.rs` changes.
+
+**Cold-start benchmark (gating for Phase 1, since speed is the goal):** measure
+time-to-first-display for a large camera JPEG (and a large PNG) — comparing the new
+`zen* + parallel` path against the current image-rs path — on **both x86_64 and arm64**
+(Apple Silicon). Record numbers in the plan/PR. Expectation: meaningful speedup on x86_64
+for JPEGs with restart markers; arm64 may show a smaller (multi-core-only, scalar-per-core)
+gain until zenjpeg NEON lands. If a large JPEG shows *no* gain, verify it has DRI restart
+markers (the parallel path needs them). This benchmark is how we confirm the migration
+delivers its primary motivation — not a nice-to-have.
 
 ### Phase 2 — new formats (HEIC/HEIF + AVIF)
-Add `heic` (`backend-rust`) and AVIF (`av1`). Extend `imageset::SUPPORTED` with `heic`,
-`heif`, `avif`. Port `display_dimensions` probes for them. **Done when:** HEIC and AVIF
-display; undecodable HEICs (heic decodes ~118/162 conformance files) degrade gracefully via
-the existing error path; fixture tests cover a real HEIC and AVIF. Add the AGPL/HEVC patent
-notice to docs.
+Add `heic` (`backend-rust`, `parallel`) and AVIF (`zenavif`). Extend `imageset::SUPPORTED`
+with `heic`, `heif`, `avif`. Port `display_dimensions` probes for them. **Done when:** HEIC
+and AVIF display; undecodable HEICs (heic decodes ~118/162 conformance files) degrade
+gracefully via the existing error path; fixture tests cover a real HEIC and AVIF. Add the
+AGPL/HEVC patent notice to docs.
 
 ## Testing
 
@@ -215,9 +241,16 @@ notice to docs.
 - **HEIC conformance (HIGH, Phase 2):** ~118/162 HEIF files decode; output not bit-exact
   (fine for a viewer). → Graceful per-image error path (already present); ship HEIC as
   best-effort.
-- **Concurrency clash (MEDIUM):** the speed features pull rayon. → Keep `parallel` OFF;
-  revisit only after on-target (esp. arm64) benchmarks, and if ever enabled, constrain rayon
-  so it can't fight the prefetch worker.
+- **Parallel-decode win is conditional (MEDIUM) — verify, don't assume:** zenjpeg's
+  `parallel` JPEG path engages only with DRI **restart markers** + ≥1024 MCU; progressive
+  JPEGs get no benefit, and **ARM/Apple-Silicon is scalar today** (NEON not yet implemented;
+  medium confidence). HEIC tile-parallel (~2.5×) is less conditional. → This does not change
+  the decision (rayon ON), but the cold-start gain must be **measured on real target
+  hardware (x86_64 and arm64) against the current image-rs path** — see the Phase-1
+  benchmark. If a large camera JPEG shows no speedup, check for restart markers.
+- **Prefetch vs foreground pool contention (LOW):** both workers share rayon's global pool.
+  At cold start only the foreground runs (no contention). → Acceptable at launch; scope/cap
+  the pool later only if benchmarks show prefetch stealing cores from a foreground decode.
 - **Prerelease API drift (MEDIUM):** exact decoder signatures (`zenjpeg::decoder`,
   `heic::DecoderConfig`) must be confirmed against docs.rs when implementing — the API
   sketches in this doc are indicative, not contractual.
