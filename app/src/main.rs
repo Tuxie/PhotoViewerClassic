@@ -613,6 +613,28 @@ fn caption_for(idx: usize, len: usize, path: &Path) -> String {
     format!("({}/{}) {}", idx + 1, len, file_name_of(path))
 }
 
+/// Parsed CLI: the first non-`--` argument is the image path; `--restore-geometry` is the
+/// only recognized flag. Unknown `--flags` are ignored with a one-line stderr note.
+/// Structured so future flags (e.g. cache-plan overrides) are mechanical to add.
+struct Args {
+    path: Option<PathBuf>,
+    restore_geometry: bool,
+}
+
+fn parse_args(args: impl Iterator<Item = String>) -> Args {
+    let mut path = None;
+    let mut restore_geometry = false;
+    for arg in args.skip(1) {
+        match arg.as_str() {
+            "--restore-geometry" => restore_geometry = true,
+            s if s.starts_with("--") => eprintln!("photoviewer: ignoring unknown flag {s}"),
+            _ if path.is_none() => path = Some(PathBuf::from(arg)),
+            _ => {}
+        }
+    }
+    Args { path, restore_geometry }
+}
+
 /// Build the persisted `Config` from a captured window position/size (physical units)
 /// and the current fullscreen flag. Pure so the round-trip is unit-testable without a
 /// live window — the geometry/save path itself is exercised by the `config` crate tests.
@@ -864,6 +886,20 @@ mod tests {
         tx.send(3).unwrap();
         assert_eq!(drain_batch(1, &rx), vec![1, 2, 3]);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn parse_args_takes_first_non_flag_as_path_and_recognizes_restore() {
+        let a = parse_args(["photoviewer".into(), "--restore-geometry".into(), "/p/x.jpg".into()].into_iter());
+        assert_eq!(a.path, Some(PathBuf::from("/p/x.jpg")));
+        assert!(a.restore_geometry);
+    }
+
+    #[test]
+    fn parse_args_defaults_and_ignores_unknown_flags() {
+        let a = parse_args(["photoviewer".into(), "--bogus".into()].into_iter());
+        assert_eq!(a.path, None);
+        assert!(!a.restore_geometry);
     }
 }
 
