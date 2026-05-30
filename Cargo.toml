@@ -5,7 +5,7 @@ members = ["app", "crates/imageset", "crates/decode", "crates/viewstate", "crate
 # Single source of truth for the release version — every crate inherits this via
 # `version.workspace = true`. `scripts/release.sh` bumps the line below.
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 
 [workspace.dependencies]
 slint = { version = "1.16", default-features = false, features = [
