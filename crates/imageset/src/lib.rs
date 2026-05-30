@@ -210,6 +210,21 @@ impl ImageSet {
         self.current()
     }
 
+    /// The prefetch keep-set: `(path, cap)` for each plan target, via `peek` (no cursor
+    /// move). Wrapped offsets that resolve to the same path are deduped to the highest cap.
+    pub fn keep_set(&self, plan: &PrefetchPlan) -> Vec<(PathBuf, u32)> {
+        let mut out: Vec<(PathBuf, u32)> = Vec::new();
+        for (off, cap) in plan.targets() {
+            let Some(p) = self.peek(off) else { continue };
+            match out.iter_mut().find(|(ep, _)| *ep == p) {
+                Some(existing) if cap > existing.1 => existing.1 = cap,
+                Some(_) => {}
+                None => out.push((p, cap)),
+            }
+        }
+        out
+    }
+
     /// Step the cursor back with wrap-around; returns the new current path.
     pub fn retreat(&mut self) -> Option<PathBuf> {
         if self.files.is_empty() {
@@ -323,6 +338,31 @@ mod tests {
         assert_eq!(set.advance(), Some(PathBuf::from("/d/only.jpg"))); // wraps to itself
         assert_eq!(set.retreat(), Some(PathBuf::from("/d/only.jpg")));
         assert_eq!(set.position(), 0);
+    }
+
+    #[test]
+    fn keep_set_maps_targets_through_peek() {
+        let files: Vec<PathBuf> = (0..5).map(|i| PathBuf::from(format!("/d/{i}.jpg"))).collect();
+        let set = ImageSet::new(files, 2);
+        assert_eq!(
+            set.keep_set(&DEFAULT_PLAN),
+            vec![
+                (PathBuf::from("/d/2.jpg"), 16384),
+                (PathBuf::from("/d/3.jpg"), 16384),
+                (PathBuf::from("/d/1.jpg"), 16384),
+                (PathBuf::from("/d/4.jpg"), 4096),
+            ]
+        );
+    }
+
+    #[test]
+    fn keep_set_dedupes_wrapped_offsets_keeping_full() {
+        // 2 files: offsets {0,+1,-1,+2} wrap → each path appears twice; full must win.
+        let set = ImageSet::new(vec![PathBuf::from("/d/a.jpg"), PathBuf::from("/d/b.jpg")], 0);
+        let ks = set.keep_set(&DEFAULT_PLAN);
+        assert_eq!(ks.len(), 2);
+        assert!(ks.contains(&(PathBuf::from("/d/a.jpg"), 16384))); // off 0 (full) beats off +2 (preview)
+        assert!(ks.contains(&(PathBuf::from("/d/b.jpg"), 16384)));
     }
 
     #[test]
