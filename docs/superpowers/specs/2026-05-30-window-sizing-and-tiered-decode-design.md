@@ -202,7 +202,9 @@ monitor reads work.) Therefore:
      at the image's **aspect** (using the default preferred height as the reference), so the
      window opens at the right *shape*. Header read only — no monitor needed. On `None`,
      leave the default preferred size.
-- **On the first `image-presented(is_new=true)`** (guarded by a one-shot `did_initial_fit`):
+- **On the first `image-presented(is_new=true)`** (and every subsequent one — gated by an
+  `auto_fit` flag, NOT a one-shot guard, so it re-fits on each navigation; `auto_fit` is off
+  when starting fullscreen or restoring saved geometry):
   if not `config.fullscreen`, not restored-geometry, and not `is_maximized` → call
   `fit_window_to_aspect` for the precise **80% of monitor**. The window is now live, so the
   monitor and `scale_factor` are real. This is the natural single site — navigation already
