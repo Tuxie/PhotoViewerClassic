@@ -277,7 +277,9 @@ fn main() -> Result<(), slint::PlatformError> {
     // burst of jobs to (the latest Show + net rotation). This bounds CPU to one core and
     // memory to ~one in-flight image, instead of spawning an unbounded, non-cancellable
     // decode thread per keypress (which pegged ~8 cores / multiple GB under rapid nav).
-    let decode_tx = spawn_decode_worker(ui.as_weak(), cache.clone(), plan);
+    let (weak_tx, weak_rx) = mpsc::channel::<slint::Weak<AppWindow>>();
+    let decode_tx = spawn_decode_worker(weak_rx, cache.clone(), plan);
+    let _ = weak_tx.send(ui.as_weak());
 
     // Rotate keys hand a Job to the decode worker; the rotated frame comes back through
     // `image-presented` (is_new = false), keeping the current zoom/mode.
@@ -415,6 +417,21 @@ fn reduce_batch(jobs: Vec<Job>) -> (Option<(PathBuf, Option<String>)>, i32) {
     (show, delta)
 }
 
+/// What the cache can offer for a path, relative to the full cap.
+enum ShowSource {
+    Full(Arc<image::RgbaImage>),    // cached at >= full_cap: show directly
+    Preview(Arc<image::RgbaImage>), // cached at preview only: show now, upgrade later
+    Miss,                           // not cached: decode at full directly
+}
+
+fn resolve_show(cache: &Cache, path: &Path, full_cap: u32) -> ShowSource {
+    match cache.lock().unwrap().get(path) {
+        Some(c) if c.cap >= full_cap => ShowSource::Full(c.buffer.clone()),
+        Some(c) => ShowSource::Preview(c.buffer.clone()),
+        None => ShowSource::Miss,
+    }
+}
+
 /// Obtain the rotation-0 BASE buffer for `path` at >= `target_cap`: return the cached
 /// buffer on a sufficient hit, else decode at `target_cap`, cache it (tagged with the
 /// cap), and return it.
@@ -457,36 +474,90 @@ fn rotate_turns(base: &Arc<image::RgbaImage>, turns: i32) -> Arc<image::RgbaImag
 /// Spawn the single foreground decode worker, returning the sender used to queue jobs.
 /// The worker holds the rotation-0 base and current turn count across iterations, so a
 /// pure-Rotate batch re-derives the view without re-decoding.
-fn spawn_decode_worker(weak: slint::Weak<AppWindow>, cache: Cache, plan: imageset::PrefetchPlan) -> mpsc::Sender<Job> {
+fn spawn_decode_worker(
+    weak_rx: mpsc::Receiver<slint::Weak<AppWindow>>,
+    cache: Cache,
+    plan: imageset::PrefetchPlan,
+) -> mpsc::Sender<Job> {
     let (tx, rx) = mpsc::channel::<Job>();
     std::thread::spawn(move || {
-        // BASE buffer (rotation 0) of the current image, and the applied turn count.
+        let mut weak: Option<slint::Weak<AppWindow>> = None;
         let mut current: Option<(PathBuf, Arc<image::RgbaImage>)> = None;
         let mut turns: i32 = 0;
-        while let Ok(first) = rx.recv() {
-            let (show, delta) = reduce_batch(drain_batch(first, &rx));
+        let mut pending_upgrade: Option<PathBuf> = None;
 
-            // A Show swaps in a fresh base and resets rotation; its decode error is the
-            // only thing that can short-circuit this iteration.
-            if let Some((path, caption)) = show {
-                match obtain_base(&cache, &path, plan.full_cap, |p| decode::display_image(p, plan.full_cap)) {
-                    Ok(base) => {
+        loop {
+            // If an upgrade is pending and the queue is idle, perform it; otherwise block.
+            let job = if pending_upgrade.is_some() {
+                match rx.try_recv() {
+                    Ok(j) => Some(j),
+                    Err(mpsc::TryRecvError::Empty) => None,
+                    Err(mpsc::TryRecvError::Disconnected) => break,
+                }
+            } else {
+                match rx.recv() {
+                    Ok(j) => Some(j),
+                    Err(_) => break,
+                }
+            };
+
+            match job {
+                Some(first) => {
+                    let (show, delta) = reduce_batch(drain_batch(first, &rx));
+                    if let Some((path, caption)) = show {
+                        pending_upgrade = None; // a fresh Show cancels any pending upgrade
+                        let base = match resolve_show(&cache, &path, plan.full_cap) {
+                            ShowSource::Full(b) => b,
+                            ShowSource::Preview(b) => {
+                                pending_upgrade = Some(path.clone());
+                                b
+                            }
+                            ShowSource::Miss => {
+                                match decode::display_image(&path, plan.full_cap) {
+                                    Ok(img) => {
+                                        let b = Arc::new(img);
+                                        cache.lock().unwrap().insert(
+                                            path.clone(),
+                                            Cached { buffer: b.clone(), cap: plan.full_cap },
+                                        );
+                                        b
+                                    }
+                                    Err(e) => {
+                                        let msg = format!("Can't display {}: {e}", file_name_of(&path));
+                                        let w = weak.get_or_insert_with(|| weak_rx.recv().expect("UI handle"));
+                                        let _ = w.upgrade_in_event_loop(move |c| c.set_status_text(msg.into()));
+                                        continue;
+                                    }
+                                }
+                            }
+                        };
                         current = Some((path, base));
                         turns = 0;
-                        push_frame(&weak, &current, turns, caption, true);
+                        let w = weak.get_or_insert_with(|| weak_rx.recv().expect("UI handle"));
+                        push_frame(w, &current, turns, caption, true);
                     }
-                    Err(e) => {
-                        let msg = format!("Can't display {}: {e}", file_name_of(&path));
-                        let _ = weak.upgrade_in_event_loop(move |c| c.set_status_text(msg.into()));
-                        continue;
+                    if delta != 0 && current.is_some() {
+                        turns = (turns + delta).rem_euclid(4);
+                        let w = weak.get_or_insert_with(|| weak_rx.recv().expect("UI handle"));
+                        push_frame(w, &current, turns, None, false);
                     }
                 }
-            }
-
-            // Apply the net rotation to whatever base we have (keeping the caption).
-            if delta != 0 && current.is_some() {
-                turns = (turns + delta).rem_euclid(4);
-                push_frame(&weak, &current, turns, None, false);
+                None => {
+                    // Idle + pending upgrade: decode the full and swap it in (re-applying turns).
+                    let path = pending_upgrade.take().expect("pending upgrade present");
+                    if let Ok(img) = decode::display_image(&path, plan.full_cap) {
+                        let b = Arc::new(img);
+                        cache.lock().unwrap().insert(
+                            path.clone(),
+                            Cached { buffer: b.clone(), cap: plan.full_cap },
+                        );
+                        if current.as_ref().is_some_and(|(p, _)| *p == path) {
+                            current = Some((path, b));
+                            let w = weak.get_or_insert_with(|| weak_rx.recv().expect("UI handle"));
+                            push_frame(w, &current, turns, None, false); // is_new=false → keeps zoom; re-applies turns
+                        }
+                    }
+                }
             }
         }
     });
@@ -845,6 +916,20 @@ mod tests {
         assert_eq!(got.dimensions(), (2, 2));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(cache.lock().unwrap().get(&p).unwrap().cap, 16384);
+    }
+
+    #[test]
+    fn resolve_show_classifies_full_preview_and_miss() {
+        let cache: Cache = Arc::new(Mutex::new(HashMap::new()));
+        let full = PathBuf::from("/d/full.jpg");
+        let prev = PathBuf::from("/d/prev.jpg");
+        let miss = PathBuf::from("/d/miss.jpg");
+        cache.lock().unwrap().insert(full.clone(), Cached { buffer: Arc::new(image::RgbaImage::new(1, 1)), cap: 16384 });
+        cache.lock().unwrap().insert(prev.clone(), Cached { buffer: Arc::new(image::RgbaImage::new(1, 1)), cap: 4096 });
+
+        assert!(matches!(resolve_show(&cache, &full, 16384), ShowSource::Full(_)));
+        assert!(matches!(resolve_show(&cache, &prev, 16384), ShowSource::Preview(_)));
+        assert!(matches!(resolve_show(&cache, &miss, 16384), ShowSource::Miss));
     }
 
     /// One quarter-turn swaps width/height (2x1 base → 1x2), confirming the turn→op map.
