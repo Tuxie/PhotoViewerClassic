@@ -40,11 +40,14 @@ pub fn config_dir_from(get: impl Fn(&str) -> Option<String>) -> Option<PathBuf> 
 }
 
 /// Resolve the config directory using real environment variables.
+#[must_use]
 pub fn config_dir() -> Option<PathBuf> {
     config_dir_from(|k| std::env::var(k).ok())
 }
 
-/// Load config from `<dir>/config.toml`. Missing file or parse errors return `Config::default()`.
+/// Load config from `<dir>/config.toml`. Any I/O error (including a missing
+/// file) or parse error returns `Config::default()`.
+#[must_use]
 pub fn load_from(dir: &Path) -> Config {
     let path = dir.join("config.toml");
     let text = match std::fs::read_to_string(&path) {
@@ -55,6 +58,7 @@ pub fn load_from(dir: &Path) -> Config {
 }
 
 /// Load config, resolving the directory via real env vars. Any error returns `Config::default()`.
+#[must_use]
 pub fn load() -> Config {
     match config_dir() {
         Some(dir) => load_from(&dir),
@@ -65,16 +69,14 @@ pub fn load() -> Config {
 /// Write `cfg` as TOML to `<dir>/config.toml`, creating the directory if needed.
 pub fn save_to(dir: &Path, cfg: &Config) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    let text = toml::to_string(cfg)
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let text = toml::to_string(cfg).map_err(|e| std::io::Error::other(e.to_string()))?;
     std::fs::write(dir.join("config.toml"), text)
 }
 
 /// Save config, resolving the directory via real env vars.
 pub fn save(cfg: &Config) -> std::io::Result<()> {
     let dir = config_dir().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
+        std::io::Error::other(
             "config directory could not be determined (PVC_HOME / HOME / APPDATA not set)",
         )
     })?;
