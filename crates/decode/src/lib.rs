@@ -2,7 +2,7 @@ use std::io::Cursor;
 use std::path::Path;
 
 use image::imageops::{flip_horizontal, flip_vertical, rotate180, rotate270, rotate90};
-use image::{ImageReader, RgbaImage};
+use image::{DynamicImage, ImageReader, RgbImage, RgbaImage};
 
 /// Decode any supported image file to an RGBA8 buffer (call `.dimensions()` for size).
 /// Uses magic-byte sniffing (not the extension).
@@ -13,17 +13,22 @@ pub fn decode_to_rgba8(path: &Path) -> image::ImageResult<RgbaImage> {
         .to_rgba8())
 }
 
-/// Read the file once, decode to RGBA8, normalize EXIF orientation, and downscale
-/// so both sides are <= `max`. A single filesystem read serves BOTH the pixel
-/// decode and the EXIF orientation lookup (avoids opening the file twice).
+/// Read once, decode, normalize EXIF orientation, downscale so both sides <= `max`.
+/// Defers RGBA expansion past the downscale for the no-alpha (RGB/JPEG) case so no
+/// full native-resolution RGBA buffer is allocated when downscaling.
 pub fn display_image(path: &Path, max: u32) -> image::ImageResult<RgbaImage> {
     let bytes = std::fs::read(path)?;
     let orientation = orientation_from_bytes(&bytes).unwrap_or(1);
-    let rgba = ImageReader::new(Cursor::new(bytes.as_slice()))
+    let dynimg = ImageReader::new(Cursor::new(bytes.as_slice()))
         .with_guessed_format()?
-        .decode()?
-        .to_rgba8();
-    Ok(downscale_to_fit(apply_orientation(rgba, orientation), max))
+        .decode()?;
+    Ok(match dynimg {
+        DynamicImage::ImageRgb8(rgb) => {
+            let small = downscale_rgb_to_fit(apply_orientation(rgb, orientation), max);
+            DynamicImage::ImageRgb8(small).into_rgba8()
+        }
+        other => downscale_to_fit(apply_orientation(other.into_rgba8(), orientation), max),
+    })
 }
 
 /// EXIF Orientation (1..=8) parsed from in-memory image bytes, if present.
@@ -57,9 +62,16 @@ pub fn read_orientation(path: &Path) -> Option<u16> {
     orientation_from_bytes(&bytes)
 }
 
-/// Apply an EXIF orientation (1..=8) by transforming the pixel buffer.
-/// Handles the mirrored variants, which a single rotation angle cannot.
-pub fn apply_orientation(img: RgbaImage, orientation: u16) -> RgbaImage {
+/// Apply an EXIF orientation (1..=8) by transforming the pixel buffer. Generic over the
+/// pixel type so it serves both the RGB (deferred) and RGBA paths. Mirrored variants
+/// (2,4,5,7) compose a flip with a rotation.
+pub fn apply_orientation<P>(
+    img: image::ImageBuffer<P, Vec<P::Subpixel>>,
+    orientation: u16,
+) -> image::ImageBuffer<P, Vec<P::Subpixel>>
+where
+    P: image::Pixel<Subpixel = u8> + 'static,
+{
     match orientation {
         2 => flip_horizontal(&img),
         3 => rotate180(&img),
@@ -72,25 +84,40 @@ pub fn apply_orientation(img: RgbaImage, orientation: u16) -> RgbaImage {
     }
 }
 
-/// Shrink so both sides are <= `max`, preserving aspect ratio. Images already
-/// within bounds are returned unchanged (no upscaling). Uses the SIMD
-/// `fast_image_resize` (an order of magnitude faster than `image`'s scalar
-/// resize for large photos — this is the dominant cost of first display).
-pub fn downscale_to_fit(img: RgbaImage, max: u32) -> RgbaImage {
-    let (w, h) = img.dimensions();
+/// Target dims that fit `(w, h)` within `max` preserving aspect, or None if already within.
+fn fit_dims(w: u32, h: u32, max: u32) -> Option<(u32, u32)> {
     if w <= max && h <= max {
-        return img;
+        return None;
     }
     let scale = (max as f32 / w as f32).min(max as f32 / h as f32);
-    let nw = ((w as f32 * scale).round() as u32).max(1);
-    let nh = ((h as f32 * scale).round() as u32).max(1);
-    resize_rgba(img, nw, nh)
+    Some((
+        ((w as f32 * scale).round() as u32).max(1),
+        ((h as f32 * scale).round() as u32).max(1),
+    ))
+}
+
+/// Shrink an RGBA image so both sides are <= `max` (no upscaling). SIMD Lanczos3.
+pub fn downscale_to_fit(img: RgbaImage, max: u32) -> RgbaImage {
+    let (w, h) = img.dimensions();
+    match fit_dims(w, h, max) {
+        None => img,
+        Some((nw, nh)) => resize_u8x4(img, nw, nh),
+    }
+}
+
+/// Shrink an RGB image so both sides are <= `max` (no upscaling). SIMD Lanczos3.
+fn downscale_rgb_to_fit(img: RgbImage, max: u32) -> RgbImage {
+    let (w, h) = img.dimensions();
+    match fit_dims(w, h, max) {
+        None => img,
+        Some((nw, nh)) => resize_u8x3(img, nw, nh),
+    }
 }
 
 /// SIMD RGBA8 downscale via `fast_image_resize` (Lanczos3). The `expect`s are
 /// unreachable for a well-formed `RgbaImage`: its buffer is exactly `w*h*4`, the
 /// pixel types match (U8x4), and the target dims are clamped to >= 1 by the caller.
-fn resize_rgba(img: RgbaImage, nw: u32, nh: u32) -> RgbaImage {
+fn resize_u8x4(img: RgbaImage, nw: u32, nh: u32) -> RgbaImage {
     use fast_image_resize::images::Image as FirImage;
     use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
 
@@ -106,6 +133,27 @@ fn resize_rgba(img: RgbaImage, nw: u32, nh: u32) -> RgbaImage {
         )
         .expect("U8x4 -> U8x4 convolution with nonzero dimensions");
     RgbaImage::from_raw(nw, nh, dst.into_vec()).expect("resized buffer is exactly nw*nh*4 bytes")
+}
+
+/// SIMD RGB8 downscale via `fast_image_resize` (Lanczos3). The `expect`s are
+/// unreachable for a well-formed `RgbImage`: its buffer is exactly `w*h*3`, the
+/// pixel types match (U8x3), and the target dims are clamped to >= 1 by the caller.
+fn resize_u8x3(img: RgbImage, nw: u32, nh: u32) -> RgbImage {
+    use fast_image_resize::images::Image as FirImage;
+    use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
+
+    let (w, h) = img.dimensions();
+    let src = FirImage::from_vec_u8(w, h, img.into_raw(), PixelType::U8x3)
+        .expect("RgbImage backing buffer is exactly w*h*3 bytes");
+    let mut dst = FirImage::new(nw, nh, PixelType::U8x3);
+    Resizer::new()
+        .resize(
+            &src,
+            &mut dst,
+            &ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Lanczos3)),
+        )
+        .expect("U8x3 -> U8x3 convolution with nonzero dimensions");
+    RgbImage::from_raw(nw, nh, dst.into_vec()).expect("resized buffer is exactly nw*nh*3 bytes")
 }
 
 #[cfg(test)]
@@ -207,5 +255,36 @@ mod tests {
     #[test]
     fn display_dimensions_is_none_for_missing_file() {
         assert_eq!(display_dimensions(std::path::Path::new("/no/such/file.jpg")), None);
+    }
+
+    #[test]
+    fn display_image_rgb_path_matches_naive_and_fits_cap() {
+        use image::{Rgb, RgbImage};
+        // An RGB (no-alpha) PNG decodes to DynamicImage::ImageRgb8 → exercises the deferred path.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rgb.png");
+        let mut src = RgbImage::new(100, 50);
+        for (x, _y, px) in src.enumerate_pixels_mut() {
+            *px = Rgb([(x % 256) as u8, 20, 200]); // some horizontal gradient
+        }
+        src.save(&path).unwrap();
+
+        // Reference: the old naive path (decode → rgba8 → downscale).
+        let naive = {
+            let dynimg = image::ImageReader::open(&path).unwrap().decode().unwrap();
+            downscale_to_fit(dynimg.to_rgba8(), 40)
+        };
+        let got = display_image(&path, 40).unwrap();
+
+        assert!(got.width() <= 40 && got.height() <= 40);
+        assert_eq!(got.dimensions(), naive.dimensions());
+        // Per-channel equality within rounding tolerance (Lanczos on RGB vs RGBA).
+        for (a, b) in got.pixels().zip(naive.pixels()) {
+            for c in 0..4 {
+                assert!((a.0[c] as i16 - b.0[c] as i16).abs() <= 1, "channel {c} differs");
+            }
+        }
+        // Opaque alpha preserved.
+        assert_eq!(got.get_pixel(0, 0).0[3], 255);
     }
 }
