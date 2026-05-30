@@ -1,3 +1,8 @@
+// On Windows, build a GUI-subsystem binary (release only) so launching it doesn't
+// flash a console window. Debug builds keep the console for dev logging. No-op on
+// other platforms.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 slint::include_modules!();
 
 use slint::ComponentHandle;
