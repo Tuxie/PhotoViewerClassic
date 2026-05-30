@@ -563,7 +563,7 @@ fn spawn_prefetch_worker(cache: Cache) -> mpsc::Sender<Vec<(PathBuf, u32)>> {
         while let Ok(first) = rx.recv() {
             let keep = coalesce_latest(first, &rx);
             for (path, cap) in &keep {
-                let have = cache.lock().unwrap().get(path).map_or(false, |c| c.cap >= *cap);
+                let have = cache.lock().unwrap().get(path).is_some_and(|c| c.cap >= *cap);
                 if have {
                     continue;
                 }

@@ -51,7 +51,7 @@ fn orientation_from_bytes(bytes: &[u8]) -> Option<u16> {
 pub fn display_dimensions(path: &Path) -> Option<(u32, u32)> {
     let (w, h) = image::image_dimensions(path).ok()?;
     match read_orientation(path) {
-        Some(5 | 6 | 7 | 8) => Some((h, w)), // 90°/270° transpose → swap W/H
+        Some(5..=8) => Some((h, w)), // 90°/270° transpose → swap W/H
         _ => Some((w, h)),
     }
 }
