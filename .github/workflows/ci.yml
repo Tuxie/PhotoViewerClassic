@@ -58,9 +58,11 @@ jobs:
             libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libxkbcommon-dev libfontconfig-dev
       - uses: Swatinem/rust-cache@v2
-      # Build + test only — never launch the GUI. The app crate has no tests; the
-      # 14 tests live in the pure-logic imageset/decode crates. A windowed test
-      # would fail headless on Windows (stock opengl32 is GL 1.1) and need xvfb on Linux.
+      # Build + test only — never launch a real GUI window. Pure-logic crates
+      # (imageset/decode/viewstate/config) carry most tests; the app crate's headless
+      # GUI tests use i-slint-backend-testing's init_no_event_loop, which installs a
+      # non-rendering test backend (no window, no GL), so they pass cross-OS without
+      # xvfb (Linux) or a real GL context (Windows stock opengl32 is only GL 1.1).
       - name: build
         run: cargo build --workspace --verbose
       - name: test

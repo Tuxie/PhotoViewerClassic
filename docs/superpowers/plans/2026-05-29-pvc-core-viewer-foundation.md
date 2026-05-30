@@ -1054,9 +1054,17 @@ git commit -m "test(imageset): single-image wrap; docs: add README"
 - Arrow keys / `H` / `L` navigate the directory in natural-sorted, wrap-around order with
   a live caption; `Esc`/`Q` quit; bad paths show a message instead of crashing.
 
-**Next plan (Plan 2 — Interactive view & chrome):** wire the `viewstate` crate for
-zoom (`↑`/`K`, `↓`/`J`, scrollwheel-toward-cursor), pan (`Shift`+dirs, left-drag),
-rotate (`E`/`R`, via pixel-buffer transform), the `Z` view-mode cycle (Fit / 1:1 /
-last), `F` fullscreen, neighbor prefetch, the auto-hiding bottom toolbar + edge buttons,
-the `I` info overlay, and `config.toml` geometry/fullscreen persistence.
+**Plan 2 — Interactive view & chrome (DONE):** the `viewstate`/`config` crates, zoom
+(`↑`/`K`, `↓`/`J`, scroll-toward-cursor), pan (`Shift`+dirs, left-drag), view-only
+rotate (`E`/`R`), the `Z` view-mode cycle, `F` fullscreen, neighbor prefetch, the
+auto-hiding toolbar + edge buttons, the `I` info overlay, and `config.toml`
+geometry/fullscreen persistence all landed. See
+`docs/superpowers/plans/2026-05-29-pvc-interactive-view-chrome.md`.
+
+**Next plan (Plan 3 — Metadata engine):** the tag/rating subsystem — JPEG XMP
+(`dc:subject` + `MicrosoftPhoto:LastKeyword*`) + IPTC-IIM keyword writing mirroring
+Windows Explorer, `xmp:Rating`, lossless EXIF-Orientation *persistence* (so `E`/`R`
+survive navigation and other apps), atomic write + verify, then the `T` editor modal
+and the `tags.txt` autocomplete dictionary. PNG/WebP/GIF keyword writing follows, gated
+on the verified Windows JPEG/TIFF-only indexing constraint.
 ```
