@@ -462,7 +462,7 @@ constructor (define it once, reuse in all four arms).
 - [ ] **Step 2: Build against the real decoders**
 
 Run: `cargo build -p decode`
-Expected: compiles once each arm uses the confirmed API. If a decoder's output is already a `zenpixels::PixelBuffer`, `RawImage` can borrow its bytes/dims directly — adjust `raw_from_zen` accordingly.
+Expected: compiles once each arm uses the confirmed API. If a decoder's output is already a `zenpixels::PixelBuffer`, return it directly via the `RawImage`-from-`PixelBuffer` constructor (or drop `RawImage` entirely and thread `PixelBuffer` through — collapse per Task 1's findings).
 
 - [ ] **Step 3: Commit**
 
