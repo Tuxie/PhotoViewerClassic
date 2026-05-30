@@ -525,6 +525,23 @@ fn rotate_turns(base: &Arc<image::RgbaImage>, turns: i32) -> Arc<image::RgbaImag
     }
 }
 
+/// Lazily acquire the UI handle the first time the worker needs to push a frame. Returns
+/// None if the handle channel closed before delivering one — i.e. startup failed between
+/// spawning the worker and `AppWindow::new()` succeeding — so the caller exits the worker
+/// thread quietly instead of panicking on a failed `recv()`.
+fn ensure_weak<'a>(
+    weak: &'a mut Option<slint::Weak<AppWindow>>,
+    weak_rx: &mpsc::Receiver<slint::Weak<AppWindow>>,
+) -> Option<&'a slint::Weak<AppWindow>> {
+    if weak.is_none() {
+        match weak_rx.recv() {
+            Ok(w) => *weak = Some(w),
+            Err(_) => return None,
+        }
+    }
+    weak.as_ref()
+}
+
 /// Spawn the single foreground decode worker, returning the sender used to queue jobs.
 /// The worker holds the rotation-0 base and current turn count across iterations, so a
 /// pure-Rotate batch re-derives the view without re-decoding.
@@ -575,7 +592,7 @@ fn spawn_decode_worker(
                                     Ok(b) => b,
                                     Err(e) => {
                                         let msg = format!("Can't display {}: {e}", file_name_of(&path));
-                                        let w = weak.get_or_insert_with(|| weak_rx.recv().expect("UI handle"));
+                                        let Some(w) = ensure_weak(&mut weak, &weak_rx) else { break };
                                         let _ = w.upgrade_in_event_loop(move |c| c.set_status_text(msg.into()));
                                         continue;
                                     }
@@ -584,12 +601,12 @@ fn spawn_decode_worker(
                         };
                         current = Some((path, base));
                         turns = 0;
-                        let w = weak.get_or_insert_with(|| weak_rx.recv().expect("UI handle"));
+                        let Some(w) = ensure_weak(&mut weak, &weak_rx) else { break };
                         push_frame(w, &current, turns, caption, true, &limit);
                     }
                     if delta != 0 && current.is_some() {
                         turns = (turns + delta).rem_euclid(4);
-                        let w = weak.get_or_insert_with(|| weak_rx.recv().expect("UI handle"));
+                        let Some(w) = ensure_weak(&mut weak, &weak_rx) else { break };
                         push_frame(w, &current, turns, None, false, &limit);
                     }
                 }
@@ -602,7 +619,7 @@ fn spawn_decode_worker(
                     }) {
                         if current.as_ref().is_some_and(|(p, _)| *p == path) {
                             current = Some((path, b));
-                            let w = weak.get_or_insert_with(|| weak_rx.recv().expect("UI handle"));
+                            let Some(w) = ensure_weak(&mut weak, &weak_rx) else { break };
                             push_frame(w, &current, turns, None, false, &limit); // is_new=false → keeps zoom; re-applies turns
                         }
                     }

@@ -1,5 +1,4 @@
 //! Window-control helpers (sizing, monitor geometry). Kept out of `main.rs`.
-#![allow(dead_code)]
 
 /// Largest (w, h) of ratio `aspect` (w/h) fitting in 0.8 × monitor, centered on that
 /// monitor (top-left = mon_pos + offset). Pure; positions may be negative on
