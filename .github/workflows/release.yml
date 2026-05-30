@@ -1,0 +1,73 @@
+name: Release
+
+# Build the release binaries for every supported platform and attach them to a
+# GitHub Release whenever a v* tag is pushed. Cut releases with scripts/release.sh.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the release and upload assets
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing must not cancel the others' uploads.
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x86_64
+            bin: photoviewer
+          - os: macos-latest # Apple Silicon
+            label: macos-aarch64
+            bin: photoviewer
+          - os: windows-latest
+            label: windows-x86_64
+            bin: photoviewer.exe
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libfontconfig-dev
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release -p app --verbose
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          dist="photoviewer-${GITHUB_REF_NAME}-${{ matrix.label }}"
+          mkdir -p "$dist"
+          cp "target/release/${{ matrix.bin }}" "$dist/"
+          cp README.md "$dist/" 2>/dev/null || true
+          cp LICENSE* "$dist/" 2>/dev/null || true
+          tar -czf "$dist.tar.gz" "$dist"
+          echo "ASSET=$dist.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dist = "photoviewer-$env:GITHUB_REF_NAME-${{ matrix.label }}"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item "target/release/${{ matrix.bin }}" $dist/
+          if (Test-Path README.md) { Copy-Item README.md $dist/ }
+          Compress-Archive -Path $dist -DestinationPath "$dist.zip"
+          "ASSET=$dist.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true

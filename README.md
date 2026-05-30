@@ -62,5 +62,23 @@ tag/rating editing (with Windows-searchable keywords) and HEIC/AVIF decode. See
 
 ## CI
 
-GitHub Actions builds and tests on Linux, macOS (Apple Silicon), and Windows on
-every push and pull request — see `.github/workflows/ci.yml`.
+GitHub Actions builds and tests on Linux, macOS (Apple Silicon), and Windows for
+every pull request (and on release tags) — see `.github/workflows/ci.yml`. Plain
+pushes to `main` do not run CI; `main` is gated through pull requests.
+
+## Releasing
+
+Releases are cut from `main` with the helper script, which bumps the version, tags
+it, verifies the Linux release build locally with [`act`](https://github.com/nektos/act),
+then pushes the tag to trigger the cross-platform release build:
+
+```bash
+scripts/release.sh          # bump the patch (C in A.B.C) and release
+scripts/release.sh 0.2.0    # release an explicit version
+```
+
+The `v*` tag triggers `.github/workflows/release.yml`, which builds the `photoviewer`
+binary on Linux/macOS/Windows and attaches the archives to a GitHub Release. (The
+publish step is expected to fail under `act`; the script only requires the build to
+pass locally.) All crates share one version via `[workspace.package]` in the root
+`Cargo.toml`.

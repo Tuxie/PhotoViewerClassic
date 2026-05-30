@@ -1,9 +1,11 @@
 name: CI
 
+# Run on pull requests (covers opening a PR and every push to its branch) and on
+# release tags (v*). NOT on plain pushes to main — main is gated by PRs.
 on:
-  push:
-    branches: [main]
   pull_request:
+  push:
+    tags: ["v*"]
 
 concurrency:
   group: ci-${{ github.ref }}
