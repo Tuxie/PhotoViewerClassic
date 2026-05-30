@@ -3,6 +3,48 @@ use std::path::{Path, PathBuf};
 
 const SUPPORTED: [&str; 5] = ["jpg", "jpeg", "png", "webp", "gif"];
 
+/// How many neighbours to keep cached and at what quality. Hardcoded for now; every
+/// field is a future CLI/config knob, so the cache-window size is trivially configurable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PrefetchPlan {
+    pub full_cap: u32,         // 16384 ceiling, clamped to GL_MAX_TEXTURE_SIZE at runtime
+    pub preview_cap: u32,      // 4096
+    pub behind_full: usize,    // 1 → prev1 at full
+    pub ahead_full: usize,     // 1 → next1 at full
+    pub behind_preview: usize, // 0
+    pub ahead_preview: usize,  // 1 → next2 at preview
+}
+
+pub const DEFAULT_PLAN: PrefetchPlan = PrefetchPlan {
+    full_cap: 16384,
+    preview_cap: 4096,
+    behind_full: 1,
+    ahead_full: 1,
+    behind_preview: 0,
+    ahead_preview: 1,
+};
+
+impl PrefetchPlan {
+    /// (offset, cap) pairs for the keep-set, forward-priority. The preview band sits
+    /// strictly beyond the full band, so offsets never overlap or duplicate.
+    pub fn targets(&self) -> Vec<(isize, u32)> {
+        let mut v = vec![(0isize, self.full_cap)];
+        for i in 1..=self.ahead_full as isize {
+            v.push((i, self.full_cap));
+        }
+        for i in 1..=self.behind_full as isize {
+            v.push((-i, self.full_cap));
+        }
+        for i in 1..=self.ahead_preview as isize {
+            v.push((self.ahead_full as isize + i, self.preview_cap));
+        }
+        for i in 1..=self.behind_preview as isize {
+            v.push((-(self.behind_full as isize + i), self.preview_cap));
+        }
+        v
+    }
+}
+
 /// True if the path has a supported image extension (case-insensitive).
 pub fn is_supported(path: &Path) -> bool {
     match path.extension().and_then(|e| e.to_str()) {
@@ -281,5 +323,21 @@ mod tests {
         assert_eq!(set.advance(), Some(PathBuf::from("/d/only.jpg"))); // wraps to itself
         assert_eq!(set.retreat(), Some(PathBuf::from("/d/only.jpg")));
         assert_eq!(set.position(), 0);
+    }
+
+    #[test]
+    fn default_plan_targets_are_inner_full_next2_preview() {
+        let t = DEFAULT_PLAN.targets();
+        assert_eq!(
+            t,
+            vec![(0, 16384), (1, 16384), (-1, 16384), (2, 4096)],
+            "current/next1/prev1 full; next2 preview; forward-priority order"
+        );
+        // No duplicate offsets.
+        let mut offs: Vec<isize> = t.iter().map(|(o, _)| *o).collect();
+        offs.sort();
+        let len = offs.len();
+        offs.dedup();
+        assert_eq!(offs.len(), len, "offsets must be unique");
     }
 }
