@@ -9,6 +9,10 @@ path = "src/main.rs"
 
 [dependencies]
 slint = { workspace = true }
+# Named directly so the worker can hold `image::RgbaImage` buffers and apply
+# view-only quarter-turn rotations (`image::imageops::rotate90/180/270`). Pinned
+# decode-only by the workspace (no AVIF/TIFF/rayon).
+image = { workspace = true }
 decode = { path = "../crates/decode" }
 imageset = { path = "../crates/imageset" }
 

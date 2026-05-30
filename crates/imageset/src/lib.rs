@@ -145,6 +145,19 @@ impl ImageSet {
         self.files.get(self.idx).cloned()
     }
 
+    /// The path `offset` steps from the cursor, with wrap-around, WITHOUT moving the
+    /// cursor. `peek(0)` == `current()`. Returns `None` if the set is empty. Used to
+    /// compute the prefetch keep-set (current ±1) without disturbing navigation.
+    #[must_use]
+    pub fn peek(&self, offset: isize) -> Option<PathBuf> {
+        if self.files.is_empty() {
+            return None;
+        }
+        let len = self.files.len() as isize;
+        let i = (self.idx as isize + offset).rem_euclid(len) as usize;
+        self.files.get(i).cloned()
+    }
+
     /// Advance the cursor with wrap-around; returns the new current path.
     /// Named `advance` (not `next`) to avoid shadowing `Iterator::next`.
     pub fn advance(&mut self) -> Option<PathBuf> {
@@ -229,6 +242,37 @@ mod tests {
         let set = ImageSet::from_file(&dir.path().join("b2.jpg"));
         assert_eq!(set.len(), 3);
         assert_eq!(set.position(), 1);
+    }
+
+    #[test]
+    fn peek_offsets_wrap_without_moving_the_cursor() {
+        let files = vec![
+            PathBuf::from("/d/a.jpg"),
+            PathBuf::from("/d/b.jpg"),
+            PathBuf::from("/d/c.jpg"),
+        ];
+        let set = ImageSet::new(files, 0);
+        // peek(0) is the current item.
+        assert_eq!(set.peek(0), set.current());
+        assert_eq!(set.peek(0), Some(PathBuf::from("/d/a.jpg")));
+        // +1 / -1 wrap at both ends, and the cursor does NOT move.
+        assert_eq!(set.peek(1), Some(PathBuf::from("/d/b.jpg")));
+        assert_eq!(set.peek(-1), Some(PathBuf::from("/d/c.jpg"))); // wraps to the end
+        assert_eq!(set.position(), 0, "peek must not move the cursor");
+
+        // From the last item, +1 wraps to the first.
+        let set_last = ImageSet::new(
+            vec![PathBuf::from("/d/a.jpg"), PathBuf::from("/d/b.jpg")],
+            1,
+        );
+        assert_eq!(set_last.peek(1), Some(PathBuf::from("/d/a.jpg")));
+        assert_eq!(set_last.peek(-1), Some(PathBuf::from("/d/a.jpg")));
+
+        // Empty set yields None for any offset.
+        let empty = ImageSet::empty();
+        assert_eq!(empty.peek(0), None);
+        assert_eq!(empty.peek(1), None);
+        assert_eq!(empty.peek(-1), None);
     }
 
     #[test]
