@@ -16,6 +16,11 @@ export component AppWindow inherits Window {
     in property <bool> smooth: true;
     in property <float> zoom-percent;
 
+    // Keyboard view-control steps. `zoom-step` mirrors viewstate::ZOOM_STEP (the Rust
+    // const can't be imported into Slint); `pan-step` is the Shift+arrow nudge distance.
+    property <float> zoom-step: 1.25;
+    property <length> pan-step: 80px;
+
     callback quit();
     callback next-image();
     callback prev-image();
@@ -72,9 +77,9 @@ export component AppWindow inherits Window {
     }
 
     keys := FocusScope {
-        // 1.25 mirrors viewstate::ZOOM_STEP. Pan convention: a Shift+arrow nudges the
-        // image in the direction the arrow points (Shift+Left moves the image right,
-        // i.e. reveals its left edge); ViewState clamps so over-panning is harmless.
+        // Pan convention: a Shift+arrow nudges the image in the direction the arrow
+        // points (Shift+Left moves the image right, i.e. reveals its left edge);
+        // ViewState clamps so over-panning is harmless.
         key-pressed(event) => {
             if (event.text == Key.Escape || event.text == "q" || event.text == "Q") {
                 root.quit();
@@ -83,29 +88,29 @@ export component AppWindow inherits Window {
             if (event.modifiers.shift) {
                 // Pan: arrows or H/J/K/L (Shift uppercases the letter).
                 if (event.text == Key.LeftArrow || event.text == "H") {
-                    root.pan-by(80px, 0);
+                    root.pan-by(root.pan-step, 0);
                     return EventResult.accept;
                 }
                 if (event.text == Key.RightArrow || event.text == "L") {
-                    root.pan-by(-80px, 0);
+                    root.pan-by(-root.pan-step, 0);
                     return EventResult.accept;
                 }
                 if (event.text == Key.UpArrow || event.text == "K") {
-                    root.pan-by(0, 80px);
+                    root.pan-by(0, root.pan-step);
                     return EventResult.accept;
                 }
                 if (event.text == Key.DownArrow || event.text == "J") {
-                    root.pan-by(0, -80px);
+                    root.pan-by(0, -root.pan-step);
                     return EventResult.accept;
                 }
                 return EventResult.reject;
             }
             if (event.text == Key.UpArrow || event.text == "k" || event.text == "K") {
-                root.zoom-by(1.25, viewport.width / 2, viewport.height / 2);
+                root.zoom-by(root.zoom-step, viewport.width / 2, viewport.height / 2);
                 return EventResult.accept;
             }
             if (event.text == Key.DownArrow || event.text == "j" || event.text == "J") {
-                root.zoom-by(1.0 / 1.25, viewport.width / 2, viewport.height / 2);
+                root.zoom-by(1.0 / root.zoom-step, viewport.width / 2, viewport.height / 2);
                 return EventResult.accept;
             }
             if (event.text == Key.RightArrow || event.text == "l" || event.text == "L") {

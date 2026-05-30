@@ -616,12 +616,12 @@ mod tests {
         };
 
         // HIT: same Arc, decoder untouched.
-        let got = obtain_base(&cache, &hit_path, &decode).unwrap();
+        let got = obtain_base(&cache, &hit_path, decode).unwrap();
         assert!(Arc::ptr_eq(&got, &seeded), "must return the cached Arc");
         assert_eq!(calls.load(Ordering::SeqCst), 0, "hit must not decode");
 
         // MISS: decoder runs once and the result is inserted into the cache.
-        let got = obtain_base(&cache, &miss_path, &decode).unwrap();
+        let got = obtain_base(&cache, &miss_path, decode).unwrap();
         assert_eq!(got.dimensions(), (2, 2));
         assert_eq!(calls.load(Ordering::SeqCst), 1, "miss must decode once");
         assert!(
@@ -630,7 +630,7 @@ mod tests {
         );
 
         // Second call for the now-cached path must NOT decode again.
-        let _ = obtain_base(&cache, &miss_path, &decode).unwrap();
+        let _ = obtain_base(&cache, &miss_path, decode).unwrap();
         assert_eq!(
             calls.load(Ordering::SeqCst),
             1,
