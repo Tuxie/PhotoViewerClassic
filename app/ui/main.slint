@@ -192,7 +192,14 @@ export component AppWindow inherits Window {
     // whole viewport) is near the relevant edge, and stay visible while hovered. When
     // hidden the interactive TouchAreas are `enabled: false` so they pass clicks/drags
     // through to the image's view controls underneath.
-    property <bool> toolbar-shown: (ta.has-hover && ta.mouse-y > viewport.height - 80px) || toolbar-cover.has-hover;
+    // A hovered button is the item that *accepts* the move event, which aborts Slint's
+    // hit-test traversal before `toolbar-cover`/`ta` see it — so their has-hover both go
+    // false over a button. OR each button's own has-hover in (the signal that survives)
+    // to keep the bar up while hovering a button; `toolbar-cover` covers the gaps.
+    property <bool> toolbar-shown: (ta.has-hover && ta.mouse-y > viewport.height - 80px)
+        || toolbar-cover.has-hover
+        || tb-prev.has-hover || tb-next.has-hover || tb-rot-l.has-hover
+        || tb-rot-r.has-hover || tb-fs.has-hover || tb-exit.has-hover;
     property <bool> left-edge-shown: (ta.has-hover && ta.mouse-x < 80px) || left-edge.has-hover;
     property <bool> right-edge-shown: (ta.has-hover && ta.mouse-x > viewport.width - 80px) || right-edge.has-hover;
 
@@ -216,42 +223,42 @@ export component AppWindow inherits Window {
         layout := HorizontalLayout {
             padding: 6px;
             spacing: 6px;
-            ToolButton {
+            tb-prev := ToolButton {
                 label: "◀ Prev";
                 enabled: root.toolbar-shown;
                 clicked => {
                     root.prev-image();
                 }
             }
-            ToolButton {
+            tb-next := ToolButton {
                 label: "Next ▶";
                 enabled: root.toolbar-shown;
                 clicked => {
                     root.next-image();
                 }
             }
-            ToolButton {
+            tb-rot-l := ToolButton {
                 label: "↺ Rotate L";
                 enabled: root.toolbar-shown;
                 clicked => {
                     root.rotate-ccw();
                 }
             }
-            ToolButton {
+            tb-rot-r := ToolButton {
                 label: "Rotate R ↻";
                 enabled: root.toolbar-shown;
                 clicked => {
                     root.rotate-cw();
                 }
             }
-            ToolButton {
+            tb-fs := ToolButton {
                 label: "⤢ Fullscreen";
                 enabled: root.toolbar-shown;
                 clicked => {
                     root.toggle-fullscreen();
                 }
             }
-            ToolButton {
+            tb-exit := ToolButton {
                 label: "✕ Exit";
                 enabled: root.toolbar-shown;
                 clicked => {
