@@ -13,8 +13,6 @@ use std::rc::Rc;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-const MAX_DISPLAY_DIM: u32 = 4096;
-
 /// One unit of work for the foreground decode worker.
 enum Job {
     /// Show a file, optionally setting the caption once it is on screen. Decoding a
@@ -29,10 +27,17 @@ enum Job {
     Rotate(i32),
 }
 
+/// A cached decode plus the cap it was decoded to (so a full entry satisfies a preview
+/// need but never the reverse).
+struct Cached {
+    buffer: Arc<image::RgbaImage>,
+    cap: u32,
+}
+
 /// Shared decode cache, keyed by path → rotation-0 BASE buffer. Populated by both the
 /// foreground worker (on a cache miss) and the prefetch worker (neighbors). Bounded by
 /// the prefetch worker to the current keep-set (~3 entries) so memory stays flat.
-type Cache = Arc<Mutex<HashMap<PathBuf, Arc<image::RgbaImage>>>>;
+type Cache = Arc<Mutex<HashMap<PathBuf, Cached>>>;
 
 /// A frame ready for the UI: the displayed (already-rotated) pixels plus the metadata
 /// Task 4 will surface (natural dims of the displayed buffer and rotation in degrees).
@@ -236,12 +241,13 @@ fn main() -> Result<(), slint::PlatformError> {
     // Shared decode cache: the foreground worker fills it on a miss and reads it on a
     // hit; the prefetch worker fills it with neighbors and trims it to the keep-set.
     let cache: Cache = Arc::new(Mutex::new(HashMap::new()));
+    let plan = imageset::DEFAULT_PLAN;
 
     // A single decode worker handles ALL image loads: one decode at a time, draining a
     // burst of jobs to (the latest Show + net rotation). This bounds CPU to one core and
     // memory to ~one in-flight image, instead of spawning an unbounded, non-cancellable
     // decode thread per keypress (which pegged ~8 cores / multiple GB under rapid nav).
-    let decode_tx = spawn_decode_worker(ui.as_weak(), cache.clone());
+    let decode_tx = spawn_decode_worker(ui.as_weak(), cache.clone(), plan);
 
     // Rotate keys hand a Job to the decode worker; the rotated frame comes back through
     // `image-presented` (is_new = false), keeping the current zoom/mode.
@@ -274,7 +280,7 @@ fn main() -> Result<(), slint::PlatformError> {
         move || {
             if let Some(req) = nav_request(&nav, Nav::Next) {
                 let _ = tx.send(req);
-                send_prefetch(&nav, &pf);
+                send_prefetch(&nav, &plan, &pf);
             }
         }
     });
@@ -285,7 +291,7 @@ fn main() -> Result<(), slint::PlatformError> {
         move || {
             if let Some(req) = nav_request(&nav, Nav::Prev) {
                 let _ = tx.send(req);
-                send_prefetch(&nav, &pf);
+                send_prefetch(&nav, &plan, &pf);
             }
         }
     });
@@ -315,7 +321,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     caption_for(g.position(), g.len(), &path)
                 };
                 // Now that `nav` is populated, prime the neighbor cache (best-effort).
-                send_prefetch(&nav_scan, &pf);
+                send_prefetch(&nav_scan, &plan, &pf);
                 let _ = weak.upgrade_in_event_loop(move |c| c.set_caption(cap.into()));
             });
         }
@@ -349,14 +355,12 @@ fn nav_request(nav: &Arc<Mutex<imageset::ImageSet>>, dir: Nav) -> Option<Job> {
 
 /// Compute the keep-set [peek(-1), peek(0), peek(+1)] without moving the cursor and
 /// hand it to the prefetch worker. Best-effort: a closed channel is silently ignored.
-fn send_prefetch(nav: &Arc<Mutex<imageset::ImageSet>>, pf: &mpsc::Sender<Vec<PathBuf>>) {
-    let keep: Vec<PathBuf> = {
-        let g = nav.lock().unwrap();
-        [g.peek(-1), g.peek(0), g.peek(1)]
-            .into_iter()
-            .flatten()
-            .collect()
-    };
+fn send_prefetch(
+    nav: &Arc<Mutex<imageset::ImageSet>>,
+    plan: &imageset::PrefetchPlan,
+    pf: &mpsc::Sender<Vec<(PathBuf, u32)>>,
+) {
+    let keep = { nav.lock().unwrap().keep_set(plan) };
     if !keep.is_empty() {
         let _ = pf.send(keep);
     }
@@ -381,23 +385,30 @@ fn reduce_batch(jobs: Vec<Job>) -> (Option<(PathBuf, Option<String>)>, i32) {
     (show, delta)
 }
 
-/// Obtain the rotation-0 BASE buffer for `path`: return the cached `Arc` on a hit
-/// (cloning the handle, no decode), else `decode` it, cache it, and return it. Split out
-/// from the worker so the cache-hit/miss behavior is testable with an injected decoder.
+/// Obtain the rotation-0 BASE buffer for `path` at >= `target_cap`: return the cached
+/// buffer on a sufficient hit, else decode at `target_cap`, cache it (tagged with the
+/// cap), and return it.
 fn obtain_base<E>(
     cache: &Cache,
     path: &Path,
+    target_cap: u32,
     decode: impl FnOnce(&Path) -> Result<image::RgbaImage, E>,
 ) -> Result<Arc<image::RgbaImage>, E> {
-    if let Some(hit) = cache.lock().unwrap().get(path).cloned() {
-        return Ok(hit);
-    }
-    let base = Arc::new(decode(path)?);
-    cache
+    if let Some(buf) = cache
         .lock()
         .unwrap()
-        .insert(path.to_path_buf(), base.clone());
-    Ok(base)
+        .get(path)
+        .filter(|c| c.cap >= target_cap)
+        .map(|c| c.buffer.clone())
+    {
+        return Ok(buf);
+    }
+    let buffer = Arc::new(decode(path)?);
+    cache.lock().unwrap().insert(
+        path.to_path_buf(),
+        Cached { buffer: buffer.clone(), cap: target_cap },
+    );
+    Ok(buffer)
 }
 
 /// Map a quarter-turn count (0..=3) to the displayed buffer, derived from the BASE each
@@ -416,7 +427,7 @@ fn rotate_turns(base: &Arc<image::RgbaImage>, turns: i32) -> Arc<image::RgbaImag
 /// Spawn the single foreground decode worker, returning the sender used to queue jobs.
 /// The worker holds the rotation-0 base and current turn count across iterations, so a
 /// pure-Rotate batch re-derives the view without re-decoding.
-fn spawn_decode_worker(weak: slint::Weak<AppWindow>, cache: Cache) -> mpsc::Sender<Job> {
+fn spawn_decode_worker(weak: slint::Weak<AppWindow>, cache: Cache, plan: imageset::PrefetchPlan) -> mpsc::Sender<Job> {
     let (tx, rx) = mpsc::channel::<Job>();
     std::thread::spawn(move || {
         // BASE buffer (rotation 0) of the current image, and the applied turn count.
@@ -428,7 +439,7 @@ fn spawn_decode_worker(weak: slint::Weak<AppWindow>, cache: Cache) -> mpsc::Send
             // A Show swaps in a fresh base and resets rotation; its decode error is the
             // only thing that can short-circuit this iteration.
             if let Some((path, caption)) = show {
-                match obtain_base(&cache, &path, |p| decode::display_image(p, MAX_DISPLAY_DIM)) {
+                match obtain_base(&cache, &path, plan.full_cap, |p| decode::display_image(p, plan.full_cap)) {
                     Ok(base) => {
                         current = Some((path, base));
                         turns = 0;
@@ -511,26 +522,30 @@ fn push_frame(
 }
 
 /// Spawn the single prefetch worker, sharing `cache` with the foreground worker. Each
-/// message is the keep-set of paths (current ±1); only the newest queued set matters, so
-/// bursts coalesce. Neighbors not yet cached are decoded and inserted; any entry whose
-/// key is NOT in the keep-set is dropped, bounding the cache to ~3 entries. Errors for a
-/// neighbor are skipped silently (a broken file must not crash the prefetcher).
-fn spawn_prefetch_worker(cache: Cache) -> mpsc::Sender<Vec<PathBuf>> {
-    let (tx, rx) = mpsc::channel::<Vec<PathBuf>>();
+/// message is the keep-set of (path, cap) pairs (current ±1); only the newest queued set
+/// matters, so bursts coalesce. Neighbors not yet cached (or cached at a lower cap) are
+/// decoded and inserted; any entry whose key is NOT in the keep-set is dropped, bounding
+/// the cache to ~3 entries. Errors for a neighbor are skipped silently (a broken file
+/// must not crash the prefetcher).
+fn spawn_prefetch_worker(cache: Cache) -> mpsc::Sender<Vec<(PathBuf, u32)>> {
+    let (tx, rx) = mpsc::channel::<Vec<(PathBuf, u32)>>();
     std::thread::spawn(move || {
         while let Ok(first) = rx.recv() {
             let keep = coalesce_latest(first, &rx);
-            for path in &keep {
-                let cached = cache.lock().unwrap().contains_key(path);
-                if cached {
+            for (path, cap) in &keep {
+                let have = cache.lock().unwrap().get(path).map_or(false, |c| c.cap >= *cap);
+                if have {
                     continue;
                 }
-                if let Ok(rgba) = decode::display_image(path, MAX_DISPLAY_DIM) {
-                    cache.lock().unwrap().insert(path.clone(), Arc::new(rgba));
+                if let Ok(rgba) = decode::display_image(path, *cap) {
+                    cache.lock().unwrap().insert(
+                        path.clone(),
+                        Cached { buffer: Arc::new(rgba), cap: *cap },
+                    );
                 }
             }
-            // Trim anything outside the keep-set to bound memory.
-            cache.lock().unwrap().retain(|k, _| keep.contains(k));
+            let keep_paths: std::collections::HashSet<&PathBuf> = keep.iter().map(|(p, _)| p).collect();
+            cache.lock().unwrap().retain(|k, _| keep_paths.contains(k));
         }
     });
     tx
@@ -752,22 +767,15 @@ mod tests {
         assert_eq!(delta, 0);
     }
 
-    /// On a cache HIT, `obtain_base` returns the cached Arc and never calls the decoder.
-    /// On a MISS it calls the decoder once and caches the result for next time.
     #[test]
-    fn obtain_base_uses_cache_on_hit_and_decodes_on_miss() {
+    fn obtain_base_respects_cap_on_hit_and_decodes_on_miss() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-
         let cache: Cache = Arc::new(Mutex::new(HashMap::new()));
-        let hit_path = PathBuf::from("/d/hit.jpg");
-        let miss_path = PathBuf::from("/d/miss.jpg");
+        let p = PathBuf::from("/d/x.jpg");
 
-        // Pre-seed the cache with a tiny 1x1 buffer for the hit path.
+        // Seeded at preview cap 4096.
         let seeded = Arc::new(image::RgbaImage::new(1, 1));
-        cache
-            .lock()
-            .unwrap()
-            .insert(hit_path.clone(), seeded.clone());
+        cache.lock().unwrap().insert(p.clone(), Cached { buffer: seeded.clone(), cap: 4096 });
 
         let calls = AtomicUsize::new(0);
         let decode = |_p: &Path| -> Result<image::RgbaImage, std::io::Error> {
@@ -775,27 +783,16 @@ mod tests {
             Ok(image::RgbaImage::new(2, 2))
         };
 
-        // HIT: same Arc, decoder untouched.
-        let got = obtain_base(&cache, &hit_path, decode).unwrap();
-        assert!(Arc::ptr_eq(&got, &seeded), "must return the cached Arc");
-        assert_eq!(calls.load(Ordering::SeqCst), 0, "hit must not decode");
+        // Requesting at <= cached cap → HIT, no decode, same Arc.
+        let got = obtain_base(&cache, &p, 4096, decode).unwrap();
+        assert!(Arc::ptr_eq(&got, &seeded));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
 
-        // MISS: decoder runs once and the result is inserted into the cache.
-        let got = obtain_base(&cache, &miss_path, decode).unwrap();
+        // Requesting at a HIGHER cap → MISS, decode once, cache upgraded to the new cap.
+        let got = obtain_base(&cache, &p, 16384, decode).unwrap();
         assert_eq!(got.dimensions(), (2, 2));
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "miss must decode once");
-        assert!(
-            cache.lock().unwrap().contains_key(&miss_path),
-            "miss result must be cached"
-        );
-
-        // Second call for the now-cached path must NOT decode again.
-        let _ = obtain_base(&cache, &miss_path, decode).unwrap();
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "second hit must not decode"
-        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(cache.lock().unwrap().get(&p).unwrap().cap, 16384);
     }
 
     /// One quarter-turn swaps width/height (2x1 base → 1x2), confirming the turn→op map.
