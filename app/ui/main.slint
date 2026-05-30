@@ -314,37 +314,37 @@ export component AppWindow inherits Window {
             }
             if (event.modifiers.shift) {
                 // Pan: arrows or H/J/K/L (Shift uppercases the letter).
-                if (event.text == Key.LeftArrow || event.text == "H") {
+                if (event.text == Key.LeftArrow) {
                     root.pan-by(root.pan-step, 0);
                     return EventResult.accept;
                 }
-                if (event.text == Key.RightArrow || event.text == "L") {
+                if (event.text == Key.RightArrow) {
                     root.pan-by(-root.pan-step, 0);
                     return EventResult.accept;
                 }
-                if (event.text == Key.UpArrow || event.text == "K") {
+                if (event.text == Key.UpArrow) {
                     root.pan-by(0, root.pan-step);
                     return EventResult.accept;
                 }
-                if (event.text == Key.DownArrow || event.text == "J") {
+                if (event.text == Key.DownArrow) {
                     root.pan-by(0, -root.pan-step);
                     return EventResult.accept;
                 }
                 return EventResult.reject;
             }
-            if (event.text == Key.UpArrow || event.text == "k" || event.text == "K") {
+            if (event.text == Key.UpArrow) {
                 root.zoom-by(root.zoom-step, viewport.width / 2, viewport.height / 2);
                 return EventResult.accept;
             }
-            if (event.text == Key.DownArrow || event.text == "j" || event.text == "J") {
+            if (event.text == Key.DownArrow) {
                 root.zoom-by(1.0 / root.zoom-step, viewport.width / 2, viewport.height / 2);
                 return EventResult.accept;
             }
-            if (event.text == Key.RightArrow || event.text == "l" || event.text == "L") {
+            if (event.text == Key.RightArrow) {
                 root.next-image();
                 return EventResult.accept;
             }
-            if (event.text == Key.LeftArrow || event.text == "h" || event.text == "H") {
+            if (event.text == Key.LeftArrow) {
                 root.prev-image();
                 return EventResult.accept;
             }
