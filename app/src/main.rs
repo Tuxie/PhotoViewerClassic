@@ -91,7 +91,13 @@ fn apply_geometry(ui: &AppWindow, vs: &viewstate::ViewState) {
 /// thread and reflect the result back onto the `disp-*` properties. Factored out of
 /// `main` so the headless tests can attach the exact same handlers. The rotate keys
 /// (which cross into the decode worker) are wired separately in `main`.
-fn attach_view_handlers(ui: &AppWindow, vs: &Rc<RefCell<viewstate::ViewState>>) {
+/// `on_new_image` is called (on the UI thread) after each `is_new` image-presented,
+/// with the natural pixel dimensions — used by `main` to trigger the 80%/aspect fit.
+fn attach_view_handlers(
+    ui: &AppWindow,
+    vs: &Rc<RefCell<viewstate::ViewState>>,
+    on_new_image: impl Fn(&AppWindow, u32, u32) + 'static,
+) {
     ui.on_viewport_changed({
         let vs = vs.clone();
         let weak = ui.as_weak();
@@ -142,6 +148,9 @@ fn attach_view_handlers(ui: &AppWindow, vs: &Rc<RefCell<viewstate::ViewState>>) 
                 }
             }
             apply_geometry(&ui, &vs.borrow());
+            if is_new {
+                on_new_image(&ui, nat_w as u32, nat_h as u32);
+            }
         }
     });
 }
@@ -152,7 +161,7 @@ fn main() -> Result<(), slint::PlatformError> {
         .renderer_name("femtovg".into())
         .select()?;
 
-    let initial: Option<PathBuf> = std::env::args_os().nth(1).map(PathBuf::from);
+    let args = parse_args(std::env::args());
 
     let ui = AppWindow::new()?;
 
@@ -221,23 +230,43 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
-    // Restore persisted geometry + fullscreen before the window is shown by `run()`.
-    // Read-back at quit uses physical units (window().position()/size()), so restore in
-    // physical units too for a clean round-trip.
+    // Startup window-sizing priority: fullscreen > --restore-geometry > aspect-presize.
+    // `auto_fit` stays on at runtime (fit_window_to_aspect no-ops while fullscreen),
+    // but is disabled when we restored a saved geometry or entered fullscreen at startup.
     let cfg = config::load();
-    if let Some(g) = cfg.geometry {
-        ui.window()
-            .set_position(slint::PhysicalPosition::new(g.x, g.y));
-        ui.window().set_size(slint::PhysicalSize::new(g.w, g.h));
-    }
+    let restoring = args.restore_geometry && cfg.geometry.is_some();
+    let auto_fit = Rc::new(Cell::new(!cfg.fullscreen && !restoring));
+
     if cfg.fullscreen {
         fullscreen.set(true);
         ui.window().set_fullscreen(true);
+    } else if restoring {
+        let g = cfg.geometry.as_ref().unwrap();
+        ui.window()
+            .set_position(slint::PhysicalPosition::new(g.x, g.y));
+        ui.window().set_size(slint::PhysicalSize::new(g.w, g.h));
+    } else if let Some(path) = args.path.as_ref() {
+        // Aspect pre-size: open at the image's shape so the first-frame 80% fit only rescales.
+        if let Some((w, h)) = decode::display_dimensions(path) {
+            if h > 0 {
+                let ref_h: u32 = 768; // default preferred height (matches main.slint)
+                let pre_w = ((ref_h as f32) * (w as f32 / h as f32)).round().max(1.0) as u32;
+                ui.window().set_size(slint::PhysicalSize::new(pre_w, ref_h));
+            }
+        }
     }
 
     // The pure view model lives on the UI thread; only the UI thread touches it.
     let vs = Rc::new(RefCell::new(viewstate::ViewState::new()));
-    attach_view_handlers(&ui, &vs);
+    attach_view_handlers(&ui, &vs, {
+        let auto_fit = auto_fit.clone();
+        let fs = fullscreen.clone();
+        move |ui, w, h| {
+            if auto_fit.get() {
+                window::fit_window_to_aspect(ui, w, h, fs.get());
+            }
+        }
+    });
 
     // Shared decode cache: the foreground worker fills it on a miss and reads it on a
     // hit; the prefetch worker fills it with neighbors and trims it to the keep-set.
@@ -297,7 +326,7 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
-    match initial {
+    match args.path.clone() {
         Some(path) => {
             ui.set_status_text("Loading…".into());
             // Show the requested image immediately with its bare filename; the index
@@ -974,7 +1003,7 @@ mod gui_tests {
         init_backend();
         let ui = AppWindow::new().expect("AppWindow under testing backend");
         let vs = Rc::new(RefCell::new(viewstate::ViewState::new()));
-        attach_view_handlers(&ui, &vs);
+        attach_view_handlers(&ui, &vs, |_, _, _| {});
 
         // Drive the viewport + present an image through the real handlers.
         ui.invoke_viewport_changed(800.0, 600.0);
@@ -1080,6 +1109,24 @@ mod gui_tests {
         assert!(ui.get_info_visible());
     }
 
+    #[test]
+    fn on_new_image_hook_fires_on_new_but_not_on_rotate() {
+        use std::rc::Rc;
+        init_backend();
+        let ui = AppWindow::new().expect("AppWindow under testing backend");
+        let vs = Rc::new(RefCell::new(viewstate::ViewState::new()));
+        let count = Rc::new(Cell::new(0u32));
+        attach_view_handlers(&ui, &vs, {
+            let count = count.clone();
+            move |_ui, _w, _h| count.set(count.get() + 1)
+        });
+
+        ui.invoke_viewport_changed(800.0, 600.0);
+        ui.invoke_image_presented(400, 200, true); // new → hook fires
+        ui.invoke_image_presented(200, 400, false); // rotate → no hook
+        assert_eq!(count.get(), 1, "hook fires only on is_new");
+    }
+
     /// Test 4 (Task 5) — view-only rotation. A rotated frame re-enters through
     /// `image-presented` with `is_new = false`, which must KEEP the current zoom/mode
     /// (via `set_natural`) while refitting to the swapped dimensions; a subsequent Show
@@ -1090,7 +1137,7 @@ mod gui_tests {
         init_backend();
         let ui = AppWindow::new().expect("AppWindow under testing backend");
         let vs = Rc::new(RefCell::new(viewstate::ViewState::new()));
-        attach_view_handlers(&ui, &vs);
+        attach_view_handlers(&ui, &vs, |_, _, _| {});
 
         // Present a 400x200 image (new) in an 800x600 viewport → Fit, 200%.
         ui.invoke_viewport_changed(800.0, 600.0);
