@@ -22,7 +22,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
