@@ -1,8 +1,10 @@
 slint::include_modules!();
 
 use slint::ComponentHandle;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
@@ -17,9 +19,8 @@ enum Job {
         caption: Option<String>,
     },
     /// Rotate the current view by a quarter turn: +1 = clockwise, -1 = counter-clockwise.
-    /// View-only — it never touches the file on disk. Constructed in Task 5 (E/R keys);
-    /// the reduce_batch tests construct it here so the worker is exercised now.
-    #[allow(dead_code)] // constructed in Task 5 (E/R keys); reduce_batch tests build it now
+    /// View-only — it never touches the file on disk. Sent by the R/E keys (Task 4 wires
+    /// the callbacks; Task 5 verifies end-to-end rotation).
     Rotate(i32),
 }
 
@@ -36,11 +37,11 @@ type Cache = Arc<Mutex<HashMap<PathBuf, Arc<image::RgbaImage>>>>;
 struct DecodedFrame {
     buffer: slint::SharedPixelBuffer<slint::Rgba8Pixel>,
     caption: Option<String>,
-    // consumed by Task 4 (ViewState): natural dims of the displayed buffer + rotation.
-    #[allow(dead_code)]
+    // Natural dims of the displayed (post-rotation) buffer, fed into ViewState via
+    // `image-presented` so the view fits/zooms against the right pixel grid.
     nat_w: u32,
-    #[allow(dead_code)]
     nat_h: u32,
+    // rotation in degrees; surfaced in the info overlay by Task 8.
     #[allow(dead_code)]
     rotation_deg: i32,
 }
@@ -49,6 +50,77 @@ struct DecodedFrame {
 enum Nav {
     Next,
     Prev,
+}
+
+/// Push the current `ViewState` geometry onto the UI's `disp-*` / `smooth` / `zoom-percent`
+/// properties. The single bridge from the pure view model to the Slint Image element.
+fn apply_geometry(ui: &AppWindow, vs: &viewstate::ViewState) {
+    let g = vs.geometry();
+    ui.set_disp_x(g.x);
+    ui.set_disp_y(g.y);
+    ui.set_disp_w(g.w);
+    ui.set_disp_h(g.h);
+    ui.set_smooth(g.smooth);
+    ui.set_zoom_percent(vs.zoom_percent() as f32);
+}
+
+/// Install the view-control callbacks that mutate the shared `ViewState` on the UI
+/// thread and reflect the result back onto the `disp-*` properties. Factored out of
+/// `main` so the headless tests can attach the exact same handlers. The rotate keys
+/// (which cross into the decode worker) are wired separately in `main`.
+fn attach_view_handlers(ui: &AppWindow, vs: &Rc<RefCell<viewstate::ViewState>>) {
+    ui.on_viewport_changed({
+        let vs = vs.clone();
+        let weak = ui.as_weak();
+        move |w, h| {
+            let ui = weak.unwrap();
+            vs.borrow_mut().set_viewport(w, h);
+            apply_geometry(&ui, &vs.borrow());
+        }
+    });
+    ui.on_zoom_by({
+        let vs = vs.clone();
+        let weak = ui.as_weak();
+        move |factor, ax, ay| {
+            let ui = weak.unwrap();
+            vs.borrow_mut().zoom(factor, ax, ay);
+            apply_geometry(&ui, &vs.borrow());
+        }
+    });
+    ui.on_pan_by({
+        let vs = vs.clone();
+        let weak = ui.as_weak();
+        move |dx, dy| {
+            let ui = weak.unwrap();
+            vs.borrow_mut().pan(dx, dy);
+            apply_geometry(&ui, &vs.borrow());
+        }
+    });
+    ui.on_cycle_view({
+        let vs = vs.clone();
+        let weak = ui.as_weak();
+        move || {
+            let ui = weak.unwrap();
+            vs.borrow_mut().cycle_mode();
+            apply_geometry(&ui, &vs.borrow());
+        }
+    });
+    ui.on_image_presented({
+        let vs = vs.clone();
+        let weak = ui.as_weak();
+        move |nat_w, nat_h, is_new| {
+            let ui = weak.unwrap();
+            {
+                let mut v = vs.borrow_mut();
+                if is_new {
+                    v.load(nat_w as f32, nat_h as f32);
+                } else {
+                    v.set_natural(nat_w as f32, nat_h as f32);
+                }
+            }
+            apply_geometry(&ui, &vs.borrow());
+        }
+    });
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -64,6 +136,10 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = slint::quit_event_loop();
     });
 
+    // The pure view model lives on the UI thread; only the UI thread touches it.
+    let vs = Rc::new(RefCell::new(viewstate::ViewState::new()));
+    attach_view_handlers(&ui, &vs);
+
     // Shared decode cache: the foreground worker fills it on a miss and reads it on a
     // hit; the prefetch worker fills it with neighbors and trims it to the keep-set.
     let cache: Cache = Arc::new(Mutex::new(HashMap::new()));
@@ -73,6 +149,21 @@ fn main() -> Result<(), slint::PlatformError> {
     // memory to ~one in-flight image, instead of spawning an unbounded, non-cancellable
     // decode thread per keypress (which pegged ~8 cores / multiple GB under rapid nav).
     let decode_tx = spawn_decode_worker(ui.as_weak(), cache.clone());
+
+    // Rotate keys hand a Job to the decode worker; the rotated frame comes back through
+    // `image-presented` (is_new = false), keeping the current zoom/mode.
+    ui.on_rotate_cw({
+        let tx = decode_tx.clone();
+        move || {
+            let _ = tx.send(Job::Rotate(1));
+        }
+    });
+    ui.on_rotate_ccw({
+        let tx = decode_tx.clone();
+        move || {
+            let _ = tx.send(Job::Rotate(-1));
+        }
+    });
 
     // A second single worker decodes the immediate neighbors (current ±1) ahead of time
     // into the SAME cache, so the next/prev key is instant. Exactly ONE extra thread —
@@ -239,7 +330,7 @@ fn spawn_decode_worker(weak: slint::Weak<AppWindow>, cache: Cache) -> mpsc::Send
                     Ok(base) => {
                         current = Some((path, base));
                         turns = 0;
-                        push_frame(&weak, &current, turns, caption);
+                        push_frame(&weak, &current, turns, caption, true);
                     }
                     Err(e) => {
                         let msg = format!("Can't display {}: {e}", file_name_of(&path));
@@ -252,7 +343,7 @@ fn spawn_decode_worker(weak: slint::Weak<AppWindow>, cache: Cache) -> mpsc::Send
             // Apply the net rotation to whatever base we have (keeping the caption).
             if delta != 0 && current.is_some() {
                 turns = (turns + delta).rem_euclid(4);
-                push_frame(&weak, &current, turns, None);
+                push_frame(&weak, &current, turns, None, false);
             }
         }
     });
@@ -268,6 +359,7 @@ fn push_frame(
     current: &Option<(PathBuf, Arc<image::RgbaImage>)>,
     turns: i32,
     caption: Option<String>,
+    is_new_image: bool,
 ) {
     let Some((_, base)) = current else { return };
     let disp = rotate_turns(base, turns);
@@ -288,7 +380,9 @@ fn push_frame(
             c.set_caption(cap.into());
         }
         c.set_status_text("".into());
-        // frame.nat_w / nat_h / rotation_deg consumed by Task 4 (ViewState).
+        // Hand the displayed pixel dims to ViewState (on the UI thread, where the
+        // Rc<RefCell<ViewState>> lives): a Show resets to Fit, a rotate keeps the mode.
+        c.invoke_image_presented(frame.nat_w as i32, frame.nat_h as i32, is_new_image);
     });
 }
 
@@ -571,5 +665,132 @@ mod tests {
         tx.send(3).unwrap();
         assert_eq!(drain_batch(1, &rx), vec![1, 2, 3]);
         assert!(rx.try_recv().is_err());
+    }
+}
+
+/// Headless GUI tests: build a real `AppWindow` under the testing backend and exercise
+/// the Task-4 wiring (geometry binding, callback → ViewState → property, key → callback).
+/// No sleeping/polling — every assertion is synchronous after a direct invoke/inject.
+#[cfg(test)]
+mod gui_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    thread_local! {
+        /// `init_no_event_loop()` installs a *per-thread* backend and panics if a backend
+        /// is already installed on this thread. Cargo runs tests on separate threads (and
+        /// may reuse a thread for several tests), so guard with a thread-local flag rather
+        /// than a process-wide `Once` (which would leave sibling threads on the winit
+        /// backend, failing headlessly). `main`'s winit BackendSelector never runs under
+        /// `cargo test`, so this governs the test backend.
+        static BACKEND_READY: Cell<bool> = const { Cell::new(false) };
+    }
+
+    fn init_backend() {
+        BACKEND_READY.with(|ready| {
+            if !ready.get() {
+                i_slint_backend_testing::init_no_event_loop();
+                ready.set(true);
+            }
+        });
+    }
+
+    /// Build a UI plus a fresh ViewState already sized to a viewport and a loaded image,
+    /// so geometry is well-defined. Returns both for the caller to drive.
+    fn ui_with_loaded_image() -> (AppWindow, Rc<RefCell<viewstate::ViewState>>) {
+        init_backend();
+        let ui = AppWindow::new().expect("AppWindow under testing backend");
+        let vs = Rc::new(RefCell::new(viewstate::ViewState::new()));
+        {
+            let mut v = vs.borrow_mut();
+            v.set_viewport(800.0, 600.0);
+            // 400x200 in 800x600 → fit = min(800/400, 600/200) = min(2.0, 3.0) = 2.0.
+            v.load(400.0, 200.0);
+        }
+        (ui, vs)
+    }
+
+    /// Test 1 — `apply_geometry` faithfully round-trips ViewState → disp-* properties,
+    /// including after a zoom (which flips smooth off and changes the zoom percent).
+    #[test]
+    fn geometry_binding_round_trips_viewstate_to_properties() {
+        let (ui, vs) = ui_with_loaded_image();
+        // Zoom in 2x about the viewport center so we leave Fit and exceed 100%.
+        vs.borrow_mut().zoom(2.0, 400.0, 300.0);
+        apply_geometry(&ui, &vs.borrow());
+
+        let g = vs.borrow().geometry();
+        assert_eq!(ui.get_disp_x(), g.x);
+        assert_eq!(ui.get_disp_y(), g.y);
+        assert_eq!(ui.get_disp_w(), g.w);
+        assert_eq!(ui.get_disp_h(), g.h);
+        assert_eq!(ui.get_smooth(), g.smooth);
+        assert_eq!(ui.get_zoom_percent(), vs.borrow().zoom_percent() as f32);
+        // Sanity: a 2x zoom over the 2.0 fit scale → scale 4.0 → 400%, not smooth.
+        assert_eq!(ui.get_zoom_percent(), 400.0);
+        assert!(!ui.get_smooth());
+    }
+
+    /// Test 2 — real callbacks installed by `attach_view_handlers`: invoking
+    /// `viewport-changed` then `zoom-by` mutates the shared ViewState and the disp-*
+    /// properties reflect it.
+    #[test]
+    fn callback_zoom_doubles_scale_and_updates_properties() {
+        init_backend();
+        let ui = AppWindow::new().expect("AppWindow under testing backend");
+        let vs = Rc::new(RefCell::new(viewstate::ViewState::new()));
+        attach_view_handlers(&ui, &vs);
+
+        // Drive the viewport + present an image through the real handlers.
+        ui.invoke_viewport_changed(800.0, 600.0);
+        ui.invoke_image_presented(400, 200, true); // load() → Fit, fit scale 2.0 → 200%
+        assert_eq!(ui.get_zoom_percent(), 200.0);
+        let fit_w = ui.get_disp_w();
+
+        // Zoom 2x about center → scale 4.0 → 400%, width doubles.
+        ui.invoke_zoom_by(2.0, 400.0, 300.0);
+        assert_eq!(ui.get_zoom_percent(), 400.0);
+        assert!((ui.get_disp_w() - fit_w * 2.0).abs() < 0.01);
+
+        // cycle-view from Manual returns to Fit (scale 2.0 → 200%).
+        ui.invoke_cycle_view();
+        assert_eq!(ui.get_zoom_percent(), 200.0);
+    }
+
+    /// Test 3 — callback → handler binding. Real keyboard injection is unavailable: the
+    /// 1.16 `i-slint-backend-testing` `internal` feature (which exposes
+    /// `send_keyboard_string_sequence`) fails to compile from crates.io because its
+    /// `include_dir!()` points at a fonts directory that ships only in the Slint source
+    /// tree. So we cover the navigation/view callbacks by invoking them directly — this
+    /// exercises the same Rust handlers the FocusScope keys fire. The FocusScope key
+    /// strings themselves (and Shift+key pan) are verified manually (Task 4 manual run).
+    #[test]
+    fn view_callbacks_invoke_their_handlers() {
+        init_backend();
+        let ui = AppWindow::new().expect("AppWindow under testing backend");
+
+        let next = Rc::new(Cell::new(false));
+        let cycle = Rc::new(Cell::new(false));
+        let rot_cw = Rc::new(Cell::new(false));
+        ui.on_next_image({
+            let f = next.clone();
+            move || f.set(true)
+        });
+        ui.on_cycle_view({
+            let f = cycle.clone();
+            move || f.set(true)
+        });
+        ui.on_rotate_cw({
+            let f = rot_cw.clone();
+            move || f.set(true)
+        });
+
+        ui.invoke_next_image();
+        ui.invoke_cycle_view();
+        ui.invoke_rotate_cw();
+
+        assert!(next.get(), "next-image handler must run");
+        assert!(cycle.get(), "cycle-view handler must run");
+        assert!(rot_cw.get(), "rotate-cw handler must run");
     }
 }

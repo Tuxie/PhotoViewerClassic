@@ -15,6 +15,14 @@ slint = { workspace = true }
 image = { workspace = true }
 decode = { path = "../crates/decode" }
 imageset = { path = "../crates/imageset" }
+viewstate = { path = "../crates/viewstate" }
 
 [build-dependencies]
 slint-build = { workspace = true }
+
+[dev-dependencies]
+# Headless GUI tests build a real AppWindow under init_no_event_loop(). The keyboard
+# `internal` feature is NOT enabled: its include_dir!() points at a fonts directory that
+# ships only in the Slint source tree (not the published crate), so it fails to compile.
+# Key bindings are therefore covered by invoking the declared callbacks directly.
+i-slint-backend-testing = "1.16"
