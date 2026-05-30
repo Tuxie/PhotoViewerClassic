@@ -1,7 +1,7 @@
 slint::include_modules!();
 
 use slint::ComponentHandle;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -132,9 +132,74 @@ fn main() -> Result<(), slint::PlatformError> {
     let initial: Option<PathBuf> = std::env::args_os().nth(1).map(PathBuf::from);
 
     let ui = AppWindow::new()?;
-    ui.on_quit(|| {
-        let _ = slint::quit_event_loop();
+
+    // UI-thread fullscreen flag. We use the public `window().set_fullscreen(bool)` API
+    // (i-slint-core 1.16): it backs the `Window`'s `full-screen` in-property and calls
+    // `update_window_properties()`, so it both ENTERS (true) and EXITS (false) fullscreen
+    // — verified against the 1.16 source (set_fullscreen → full_screen.set(enabled)).
+    let fullscreen = Rc::new(Cell::new(false));
+
+    // The persisted geometry/fullscreen captured at quit time. The window may be torn
+    // down once `ui.run()` returns, so we snapshot into this slot inside the quit/close
+    // handlers (while the window is alive) and write it out AFTER run().
+    let saved: Rc<RefCell<Option<config::Config>>> = Rc::new(RefCell::new(None));
+
+    // Snapshot the live window geometry + fullscreen flag into `saved`. Called from both
+    // the Q/Esc quit path and the window-close (X) path so either persists.
+    let snapshot = {
+        let weak = ui.as_weak();
+        let fs = fullscreen.clone();
+        let saved = saved.clone();
+        move || {
+            let ui = weak.unwrap();
+            let cfg = config_from(ui.window().position(), ui.window().size(), fs.get());
+            *saved.borrow_mut() = Some(cfg);
+        }
+    };
+
+    ui.on_quit({
+        let snapshot = snapshot.clone();
+        move || {
+            snapshot();
+            let _ = slint::quit_event_loop();
+        }
     });
+
+    // The X / title-bar close button does NOT go through `on_quit`; capture geometry here
+    // too so the close button persists, then let the default close action quit the loop.
+    ui.window().on_close_requested({
+        let snapshot = snapshot.clone();
+        move || {
+            snapshot();
+            slint::CloseRequestResponse::HideWindow
+        }
+    });
+
+    // Fullscreen toggle (F key). Flip the flag and apply it to the window.
+    ui.on_toggle_fullscreen({
+        let fs = fullscreen.clone();
+        let weak = ui.as_weak();
+        move || {
+            let ui = weak.unwrap();
+            let now = !fs.get();
+            fs.set(now);
+            ui.window().set_fullscreen(now);
+        }
+    });
+
+    // Restore persisted geometry + fullscreen before the window is shown by `run()`.
+    // Read-back at quit uses physical units (window().position()/size()), so restore in
+    // physical units too for a clean round-trip.
+    let cfg = config::load();
+    if let Some(g) = cfg.geometry {
+        ui.window()
+            .set_position(slint::PhysicalPosition::new(g.x, g.y));
+        ui.window().set_size(slint::PhysicalSize::new(g.w, g.h));
+    }
+    if cfg.fullscreen {
+        fullscreen.set(true);
+        ui.window().set_fullscreen(true);
+    }
 
     // The pure view model lives on the UI thread; only the UI thread touches it.
     let vs = Rc::new(RefCell::new(viewstate::ViewState::new()));
@@ -229,7 +294,16 @@ fn main() -> Result<(), slint::PlatformError> {
         None => ui.set_status_text("No image. Usage: photoviewer <path>".into()),
     }
 
-    ui.run()
+    ui.run()?;
+
+    // Persist the geometry/fullscreen snapshot captured at quit/close time. Best-effort:
+    // if no config dir is resolvable / writable (e.g. $PVC_HOME unset & unwritable),
+    // persistence is silently skipped per spec.
+    if let Some(cfg) = saved.borrow().clone() {
+        let _ = config::save(&cfg);
+    }
+
+    Ok(())
 }
 
 /// Move the cursor under the lock and build the Show job for the new current image,
@@ -456,6 +530,25 @@ fn caption_for(idx: usize, len: usize, path: &Path) -> String {
     format!("({}/{}) {}", idx + 1, len, file_name_of(path))
 }
 
+/// Build the persisted `Config` from a captured window position/size (physical units)
+/// and the current fullscreen flag. Pure so the round-trip is unit-testable without a
+/// live window — the geometry/save path itself is exercised by the `config` crate tests.
+fn config_from(
+    pos: slint::PhysicalPosition,
+    size: slint::PhysicalSize,
+    fullscreen: bool,
+) -> config::Config {
+    config::Config {
+        geometry: Some(config::WindowGeometry {
+            x: pos.x,
+            y: pos.y,
+            w: size.width,
+            h: size.height,
+        }),
+        fullscreen,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -654,6 +747,29 @@ mod tests {
         assert_eq!(
             rotate_turns(&base, 1).dimensions(),
             image::imageops::rotate90(base.as_ref()).dimensions()
+        );
+    }
+
+    /// `config_from` packs a (position, size, fullscreen) snapshot into the persisted
+    /// `Config` using physical units — the same space read back at quit, so it round-trips.
+    #[test]
+    fn config_from_packs_geometry_and_fullscreen() {
+        let cfg = config_from(
+            slint::PhysicalPosition::new(-5, 12),
+            slint::PhysicalSize::new(1280, 720),
+            true,
+        );
+        assert_eq!(
+            cfg,
+            config::Config {
+                geometry: Some(config::WindowGeometry {
+                    x: -5,
+                    y: 12,
+                    w: 1280,
+                    h: 720,
+                }),
+                fullscreen: true,
+            }
         );
     }
 

@@ -16,6 +16,7 @@ image = { workspace = true }
 decode = { path = "../crates/decode" }
 imageset = { path = "../crates/imageset" }
 viewstate = { path = "../crates/viewstate" }
+config = { path = "../crates/config" }
 
 [build-dependencies]
 slint-build = { workspace = true }
