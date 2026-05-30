@@ -38,6 +38,19 @@ fn orientation_from_bytes(bytes: &[u8]) -> Option<u16> {
     }
 }
 
+/// Header-only natural display dimensions (post-EXIF-orientation), without decoding
+/// pixels. Used to size the window before the first decode. Returns None on error.
+/// NOTE: `image::image_dimensions` guesses format by file EXTENSION (unlike the
+/// magic-byte decode path), so a missing/wrong extension yields None — the caller
+/// falls back to the default window size.
+pub fn display_dimensions(path: &Path) -> Option<(u32, u32)> {
+    let (w, h) = image::image_dimensions(path).ok()?;
+    match read_orientation(path) {
+        Some(5 | 6 | 7 | 8) => Some((h, w)), // 90°/270° transpose → swap W/H
+        _ => Some((w, h)),
+    }
+}
+
 /// Read the EXIF Orientation tag (1..=8) from a file path, if present.
 pub fn read_orientation(path: &Path) -> Option<u16> {
     let bytes = std::fs::read(path).ok()?;
@@ -181,5 +194,18 @@ mod tests {
         let out = display_image(&path, 40).unwrap();
         assert!(out.width() <= 40 && out.height() <= 40);
         assert_eq!(out.width(), 40); // limiting side hits max
+    }
+
+    #[test]
+    fn display_dimensions_reads_header_without_exif_swap_for_orientation_1() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.png");
+        image::RgbaImage::new(40, 20).save(&path).unwrap(); // no EXIF → orientation 1
+        assert_eq!(display_dimensions(&path), Some((40, 20)));
+    }
+
+    #[test]
+    fn display_dimensions_is_none_for_missing_file() {
+        assert_eq!(display_dimensions(std::path::Path::new("/no/such/file.jpg")), None);
     }
 }
