@@ -65,7 +65,12 @@ jobs:
           Compress-Archive -Path $dist -DestinationPath "$dist.zip"
           "ASSET=$dist.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      # Skipped under `act` (which sets ACT=true): local verification must never touch
+      # GitHub. `act` may inherit a real gh PAT, so without this guard the "verification"
+      # run would actually publish a release. The build/package steps above are what we
+      # verify locally; this step only runs on real GitHub Actions.
       - name: Publish GitHub Release
+        if: ${{ !env.ACT }}
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.ASSET }}

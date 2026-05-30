@@ -44,7 +44,8 @@ fi
 echo "$target" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || die "invalid version '$target' (want A.B.C)"
 tag="v$target"
 
-git rev-parse -q --verify "refs/tags/$tag" >/dev/null 2>&1 && die "tag $tag already exists"
+git rev-parse -q --verify "refs/tags/$tag" >/dev/null 2>&1 && die "tag $tag already exists locally"
+[ -n "$(git ls-remote --tags origin "refs/tags/$tag" 2>/dev/null)" ] && die "tag $tag already exists on origin"
 
 echo "==> Releasing $tag  (current workspace version: $current)"
 
