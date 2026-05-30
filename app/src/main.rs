@@ -513,15 +513,10 @@ fn spawn_decode_worker(
                                 b
                             }
                             ShowSource::Miss => {
-                                match decode::display_image(&path, plan.full_cap) {
-                                    Ok(img) => {
-                                        let b = Arc::new(img);
-                                        cache.lock().unwrap().insert(
-                                            path.clone(),
-                                            Cached { buffer: b.clone(), cap: plan.full_cap },
-                                        );
-                                        b
-                                    }
+                                match obtain_base(&cache, &path, plan.full_cap, |p| {
+                                    decode::display_image(p, plan.full_cap)
+                                }) {
+                                    Ok(b) => b,
                                     Err(e) => {
                                         let msg = format!("Can't display {}: {e}", file_name_of(&path));
                                         let w = weak.get_or_insert_with(|| weak_rx.recv().expect("UI handle"));
@@ -545,12 +540,9 @@ fn spawn_decode_worker(
                 None => {
                     // Idle + pending upgrade: decode the full and swap it in (re-applying turns).
                     let path = pending_upgrade.take().expect("pending upgrade present");
-                    if let Ok(img) = decode::display_image(&path, plan.full_cap) {
-                        let b = Arc::new(img);
-                        cache.lock().unwrap().insert(
-                            path.clone(),
-                            Cached { buffer: b.clone(), cap: plan.full_cap },
-                        );
+                    if let Ok(b) = obtain_base(&cache, &path, plan.full_cap, |p| {
+                        decode::display_image(p, plan.full_cap)
+                    }) {
                         if current.as_ref().is_some_and(|(p, _)| *p == path) {
                             current = Some((path, b));
                             let w = weak.get_or_insert_with(|| weak_rx.recv().expect("UI handle"));
