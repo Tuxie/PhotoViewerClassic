@@ -129,8 +129,13 @@ except its `SUPPORTED` list in Phase 2) are unchanged.
 | `zenpng` | 1 | decode + `zencodec` | encode, `imagequant`(C) |
 | `zenwebp` | 1 | decode + `zencodec` | encode |
 | `zengif` | 1 | decode + `zencodec` | encode |
-| `heic` | 2 | `backend-rust` | `parallel`/rayon, native backends (`backend-mediafoundation` etc.) |
-| AVIF: `heic` `av1` (→ `rav1d-safe`) or `zenavif` | 2 | `av1` | `unsafe-asm`, rav1d-safe `asm`/`partial_asm`/`c-ffi` |
+| `heic` (HEIC/HEIF) | 2 | `backend-rust` | `parallel`/rayon, native backends (`backend-mediafoundation` etc.) |
+| `zenavif` (standalone `.avif`) | 2 | decode + `zencodec` | `unsafe-asm`, rav1d-safe `asm`/`partial_asm`/`c-ffi` |
+
+AVIF decoder choice: use the **dedicated `zenavif`** crate for standalone `.avif` files
+(both `zenavif` and `heic`'s `av1` feature route AV1 through `rav1d-safe`; `heic av1`
+specifically targets AV1-in-HEIF containers). Confirm against docs.rs at implementation
+time which cleanly handles bare `.avif`; `heic av1` is the fallback if `zenavif` does not.
 
 Workspace `Cargo.toml`: the `image` dependency becomes `default-features = false` with
 **no codec features** (retained only for `RgbaImage`/`RgbImage`/`imageops`). `kamadak-exif`
