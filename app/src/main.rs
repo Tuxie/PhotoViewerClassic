@@ -156,14 +156,38 @@ fn attach_view_handlers(
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    let args = parse_args(std::env::args());
+
+    // Build the cache + decode/prefetch workers + nav cursor BEFORE backend init and
+    // window construction, then dispatch the cold image's Show immediately. The decode
+    // worker does pure CPU work (no Slint), so the file read + decode overlap the
+    // BackendSelector::select() and AppWindow::new() below. The worker (channel-delivered
+    // its UI handle) decodes exactly once and blocks for the handle only at its first
+    // push, which we deliver right after AppWindow::new().
+    let plan = imageset::DEFAULT_PLAN;
+    let cache: Cache = Arc::new(Mutex::new(HashMap::new()));
+    let (weak_tx, weak_rx) = mpsc::channel::<slint::Weak<AppWindow>>();
+    let decode_tx = spawn_decode_worker(weak_rx, cache.clone(), plan);
+    let prefetch_tx = spawn_prefetch_worker(cache.clone());
+    let nav = Arc::new(Mutex::new(imageset::ImageSet::empty()));
+
+    // Dispatch the cold image's decode now (no `ui` needed) so it overlaps the UI setup
+    // that follows. This is the ONLY Show for this path until navigation — the `match`
+    // block below must NOT re-dispatch it.
+    if let Some(path) = args.path.clone() {
+        let _ = decode_tx.send(Job::Show { path, caption: None });
+    }
+
     slint::BackendSelector::new()
         .backend_name("winit".into())
         .renderer_name("femtovg".into())
         .select()?;
 
-    let args = parse_args(std::env::args());
-
     let ui = AppWindow::new()?;
+
+    // Hand the UI handle to the decode worker; it's been blocked on this since its first
+    // push of the cold frame.
+    let _ = weak_tx.send(ui.as_weak());
 
     // UI-thread fullscreen flag. We use the public `window().set_fullscreen(bool)` API
     // (i-slint-core 1.16): it backs the `Window`'s `full-screen` in-property and calls
@@ -268,18 +292,9 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
-    // Shared decode cache: the foreground worker fills it on a miss and reads it on a
-    // hit; the prefetch worker fills it with neighbors and trims it to the keep-set.
-    let cache: Cache = Arc::new(Mutex::new(HashMap::new()));
-    let plan = imageset::DEFAULT_PLAN;
-
-    // A single decode worker handles ALL image loads: one decode at a time, draining a
-    // burst of jobs to (the latest Show + net rotation). This bounds CPU to one core and
-    // memory to ~one in-flight image, instead of spawning an unbounded, non-cancellable
-    // decode thread per keypress (which pegged ~8 cores / multiple GB under rapid nav).
-    let (weak_tx, weak_rx) = mpsc::channel::<slint::Weak<AppWindow>>();
-    let decode_tx = spawn_decode_worker(weak_rx, cache.clone(), plan);
-    let _ = weak_tx.send(ui.as_weak());
+    // The cache, decode worker, prefetch worker, and nav cursor were created BEFORE the
+    // UI (so the cold decode overlaps backend init / window construction); the handlers
+    // below capture those already-created senders.
 
     // Rotate keys hand a Job to the decode worker; the rotated frame comes back through
     // `image-presented` (is_new = false), keeping the current zoom/mode.
@@ -295,15 +310,6 @@ fn main() -> Result<(), slint::PlatformError> {
             let _ = tx.send(Job::Rotate(-1));
         }
     });
-
-    // A second single worker decodes the immediate neighbors (current ±1) ahead of time
-    // into the SAME cache, so the next/prev key is instant. Exactly ONE extra thread —
-    // never per-request — keeping the concurrency bounded to two decodes max.
-    let prefetch_tx = spawn_prefetch_worker(cache.clone());
-
-    // Shared navigation cursor: read/advanced on the UI thread, populated once by
-    // the background directory scan (hence Arc<Mutex<_>>).
-    let nav = Arc::new(Mutex::new(imageset::ImageSet::empty()));
 
     ui.on_next_image({
         let nav = nav.clone();
@@ -334,10 +340,7 @@ fn main() -> Result<(), slint::PlatformError> {
             // Show the requested image immediately with its bare filename; the index
             // isn't known until the directory scan finishes (which then adds it).
             ui.set_caption(file_name_of(&path).into());
-            let _ = decode_tx.send(Job::Show {
-                path: path.clone(),
-                caption: None,
-            });
+            // (Job::Show already dispatched before AppWindow::new, so it overlaps UI setup.)
             // Scan the directory in the background, then refresh the caption with the
             // index. Navigation is a no-op until this populates `nav` (advance/retreat
             // return None on the empty placeholder), so this only ever replaces the
