@@ -17,6 +17,9 @@ decode = { path = "../crates/decode" }
 imageset = { path = "../crates/imageset" }
 viewstate = { path = "../crates/viewstate" }
 config = { path = "../crates/config" }
+# Reach the winit window for monitor size (current_monitor) — only transitive via slint
+# today. Pinned lockstep with slint to keep a single winit 0.30.x in the tree.
+i-slint-backend-winit = { version = "=1.16.1", default-features = false }
 
 [build-dependencies]
 slint-build = { workspace = true }

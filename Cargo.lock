@@ -134,6 +134,7 @@ dependencies = [
  "config",
  "decode",
  "i-slint-backend-testing",
+ "i-slint-backend-winit",
  "image",
  "imageset",
  "slint",

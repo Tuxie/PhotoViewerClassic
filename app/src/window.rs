@@ -19,6 +19,38 @@ pub fn fit_80_dims(aspect: f32, mon_w: u32, mon_h: u32, mon_x: i32, mon_y: i32) 
     (w, h, x, y)
 }
 
+use crate::AppWindow;
+use i_slint_backend_winit::winit::dpi::{PhysicalPosition, PhysicalSize};
+use i_slint_backend_winit::WinitWindowAccessor;
+use slint::ComponentHandle;
+
+/// Monitor (size, top-left position) of the window's current monitor — None until the
+/// winit window is live (i.e. after `run()` starts) or on a non-winit backend.
+fn monitor_size(ui: &AppWindow) -> Option<(PhysicalSize<u32>, PhysicalPosition<i32>)> {
+    ui.window()
+        .with_winit_window(|w| w.current_monitor().map(|m| (m.size(), m.position())))
+        .flatten()
+}
+
+/// Whether the window is maximized (read from Slint directly — no winit round-trip).
+fn is_maximized(ui: &AppWindow) -> bool {
+    ui.window().is_maximized()
+}
+
+/// If windowed (not fullscreen, not maximized) and the monitor is known, size+center the
+/// window to 80%/aspect. No-op otherwise (so it's safe to call on every new image and
+/// under the headless testing backend, where the winit window is absent).
+pub fn fit_window_to_aspect(ui: &AppWindow, aspect_w: u32, aspect_h: u32, fullscreen: bool) {
+    if fullscreen || aspect_h == 0 || is_maximized(ui) {
+        return;
+    }
+    let Some((mon, pos)) = monitor_size(ui) else { return };
+    let aspect = aspect_w as f32 / aspect_h as f32;
+    let (w, h, x, y) = fit_80_dims(aspect, mon.width, mon.height, pos.x, pos.y);
+    ui.window().set_size(slint::PhysicalSize::new(w, h));
+    ui.window().set_position(slint::PhysicalPosition::new(x, y));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
