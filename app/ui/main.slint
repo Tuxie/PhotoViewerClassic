@@ -1,3 +1,36 @@
+// Minimal dark pill button: TouchArea-backed (a plain Rectangle has no `has-hover`),
+// reused by the bottom toolbar and the edge-navigation glyphs. `enabled` is forwarded
+// to the inner TouchArea so a hidden (faded-out) button passes clicks through to the
+// image's view controls underneath instead of swallowing them.
+component ToolButton inherits Rectangle {
+    in property <string> label;
+    in property <length> font-size: 14px;
+    in property <bool> enabled: true;
+    out property <bool> has-hover: touch.has-hover;
+    callback clicked;
+
+    background: touch.has-hover ? #ffffff30 : #ffffff14;
+    border-radius: 4px;
+    horizontal-stretch: 0;
+    min-width: t.preferred-width + 16px;
+    min-height: t.preferred-height + 10px;
+
+    t := Text {
+        text: root.label;
+        color: white;
+        font-size: root.font-size;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "Photo Viewer";
     background: black;
@@ -150,6 +183,107 @@ export component AppWindow inherits Window {
                 color: white;
             }
             // Rating/tags intentionally omitted — they arrive with the metadata plan (Plan 3).
+        }
+    }
+
+    // --- Auto-hiding chrome (Task 9) -------------------------------------------------
+    // Event-driven proximity reveal (no timers/polling, per AGENTS.md): the bottom
+    // toolbar and the left/right edge glyphs fade in while the pointer (`ta` covers the
+    // whole viewport) is near the relevant edge, and stay visible while hovered. When
+    // hidden the interactive TouchAreas are `enabled: false` so they pass clicks/drags
+    // through to the image's view controls underneath.
+    property <bool> toolbar-shown: (ta.has-hover && ta.mouse-y > viewport.height - 80px) || toolbar-cover.has-hover;
+    property <bool> left-edge-shown: (ta.has-hover && ta.mouse-x < 80px) || left-edge.has-hover;
+    property <bool> right-edge-shown: (ta.has-hover && ta.mouse-x > viewport.width - 80px) || right-edge.has-hover;
+
+    toolbar := Rectangle {
+        x: (parent.width - layout.preferred-width) / 2;
+        y: parent.height - self.height - 8px;
+        width: layout.preferred-width;
+        height: layout.preferred-height;
+        background: #000000cc;
+        border-radius: 8px;
+        opacity: root.toolbar-shown ? 1.0 : 0.0;
+        animate opacity { duration: 150ms; }
+
+        // Under the buttons (declared first → painted below, so buttons win clicks).
+        // Provides the toolbar's own `has-hover` to keep the bar visible while the
+        // pointer rests in the padding/gaps between buttons.
+        toolbar-cover := TouchArea {
+            enabled: root.toolbar-shown;
+        }
+
+        layout := HorizontalLayout {
+            padding: 6px;
+            spacing: 6px;
+            ToolButton {
+                label: "◀ Prev";
+                enabled: root.toolbar-shown;
+                clicked => {
+                    root.prev-image();
+                }
+            }
+            ToolButton {
+                label: "Next ▶";
+                enabled: root.toolbar-shown;
+                clicked => {
+                    root.next-image();
+                }
+            }
+            ToolButton {
+                label: "↺ Rotate L";
+                enabled: root.toolbar-shown;
+                clicked => {
+                    root.rotate-ccw();
+                }
+            }
+            ToolButton {
+                label: "Rotate R ↻";
+                enabled: root.toolbar-shown;
+                clicked => {
+                    root.rotate-cw();
+                }
+            }
+            ToolButton {
+                label: "⤢ Fullscreen";
+                enabled: root.toolbar-shown;
+                clicked => {
+                    root.toggle-fullscreen();
+                }
+            }
+            ToolButton {
+                label: "✕ Exit";
+                enabled: root.toolbar-shown;
+                clicked => {
+                    root.quit();
+                }
+            }
+        }
+    }
+
+    left-edge := ToolButton {
+        x: 8px;
+        y: (parent.height - self.height) / 2;
+        label: "‹";
+        font-size: 48px;
+        enabled: root.left-edge-shown;
+        opacity: root.left-edge-shown ? 1.0 : 0.0;
+        animate opacity { duration: 150ms; }
+        clicked => {
+            root.prev-image();
+        }
+    }
+
+    right-edge := ToolButton {
+        x: parent.width - self.width - 8px;
+        y: (parent.height - self.height) / 2;
+        label: "›";
+        font-size: 48px;
+        enabled: root.right-edge-shown;
+        opacity: root.right-edge-shown ? 1.0 : 0.0;
+        animate opacity { duration: 150ms; }
+        clicked => {
+            root.next-image();
         }
     }
 
