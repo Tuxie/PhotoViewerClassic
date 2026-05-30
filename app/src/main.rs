@@ -208,13 +208,15 @@ fn obtain_base<E>(
 }
 
 /// Map a quarter-turn count (0..=3) to the displayed buffer, derived from the BASE each
-/// time so rotations never compound and rounding never accumulates.
-fn rotate_turns(base: &image::RgbaImage, turns: i32) -> Arc<image::RgbaImage> {
+/// time so rotations never compound and rounding never accumulates. The common 0-turn
+/// (un-rotated) case shares the base `Arc` instead of deep-copying it — the pixels are
+/// copied once more anyway when the `SharedPixelBuffer` is built.
+fn rotate_turns(base: &Arc<image::RgbaImage>, turns: i32) -> Arc<image::RgbaImage> {
     match turns.rem_euclid(4) {
-        1 => Arc::new(image::imageops::rotate90(base)),
-        2 => Arc::new(image::imageops::rotate180(base)),
-        3 => Arc::new(image::imageops::rotate270(base)),
-        _ => Arc::new(base.clone()),
+        1 => Arc::new(image::imageops::rotate90(base.as_ref())),
+        2 => Arc::new(image::imageops::rotate180(base.as_ref())),
+        3 => Arc::new(image::imageops::rotate270(base.as_ref())),
+        _ => Arc::clone(base),
     }
 }
 
@@ -545,16 +547,19 @@ mod tests {
     /// One quarter-turn swaps width/height (2x1 base → 1x2), confirming the turn→op map.
     #[test]
     fn rotate_turns_one_swaps_dimensions() {
-        let mut base = image::RgbaImage::new(2, 1);
-        base.put_pixel(0, 0, image::Rgba([1, 2, 3, 255]));
+        let mut img = image::RgbaImage::new(2, 1);
+        img.put_pixel(0, 0, image::Rgba([1, 2, 3, 255]));
+        let base = Arc::new(img);
         assert_eq!(rotate_turns(&base, 0).dimensions(), (2, 1));
         assert_eq!(rotate_turns(&base, 1).dimensions(), (1, 2));
         assert_eq!(rotate_turns(&base, 2).dimensions(), (2, 1));
         assert_eq!(rotate_turns(&base, 3).dimensions(), (1, 2));
+        // 0 turns shares the base Arc (no deep copy).
+        assert!(Arc::ptr_eq(&rotate_turns(&base, 0), &base));
         // matches image::imageops::rotate90 directly.
         assert_eq!(
             rotate_turns(&base, 1).dimensions(),
-            image::imageops::rotate90(&base).dimensions()
+            image::imageops::rotate90(base.as_ref()).dimensions()
         );
     }
 
