@@ -4,10 +4,9 @@ A traditional, simple and FAST cross-platform desktop photo viewer application.
 
 ## Tech stack
 
-| Language | Rust v1.96+ |
+| Language | Rust v1.96+, edition 2024 |
 | GUI toolkit | Slint v1.16+ |
-| Image decoding | image-rs/image |
-| HEIC support | imazen/heic |
+| Image decoding and processing | imazen/zen* family of modules |
 | Target platforms | Windows 11, macOS, Linux |
 
 ## Core principles
@@ -25,11 +24,11 @@ Minimal. Bottom toolbar with buttons for Previous, Next, Rotate Left, Rotate Rig
 | **Key** | **Action** |
 | E | Rotate Counter-clockwise |
 | R | Rotate clockwise |
-| Left or H | Previous image |
-| Right or L | Next image |
-| Up or K | Zoom in |
-| Down or J | Zoom out |
-| Shift + Left/Right/Up/Down/H/L/K/J | Move Left/Right/Up/Down |
+| Left | Previous image |
+| Right | Next image |
+| Up | Zoom in |
+| Down | Zoom out |
+| Shift + Left/Right/Up/Down | Move Left/Right/Up/Down |
 | Z | Toggle Zoom-to-Fit / Zoom 1:1 / Last manually set zoom |
 | F | Toggle full-screen |
 | I | Toogle information overlay |
@@ -38,6 +37,7 @@ Minimal. Bottom toolbar with buttons for Previous, Next, Rotate Left, Rotate Rig
 | Esc | Cancel / Back / Quit |
 | Enter | Confirm |
 | Q | Quit |
+| H | Show help |
 
 ## Mouse navigation
 
@@ -63,3 +63,4 @@ Minimal. Bottom toolbar with buttons for Previous, Next, Rotate Left, Rotate Rig
 - Sleeping and/or polling is absolutely forbidden in the happy path. It is only allowed when recovering after error situations. Emit and/or react to events, don't poll. This includes in tests.
 - The GUI must be snappy and responsive at all times. The GUI may not be sluggish just because something heavy is going on in the background.
 - Push after every commit.
+- Update the documentation to reflect changes. Stale documentation = bug.
