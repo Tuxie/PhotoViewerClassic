@@ -21,6 +21,10 @@ export component AppWindow inherits Window {
     property <float> zoom-step: 1.25;
     property <length> pan-step: 80px;
 
+    // Last pointer position captured on press, so `moved` can pan by the delta.
+    property <length> pan-anchor-x;
+    property <length> pan-anchor-y;
+
     callback quit();
     callback next-image();
     callback prev-image();
@@ -55,6 +59,28 @@ export component AppWindow inherits Window {
             height: root.disp-h;
             source: root.current-image;
             image-rendering: root.smooth ? ImageRendering.smooth : ImageRendering.pixelated;
+        }
+
+        // Mouse view controls. Fills the viewport so `mouse-x`/`mouse-y` are in the same
+        // viewport-relative coordinates the zoom/pan callbacks expect. Scroll zooms toward
+        // the cursor; left-drag pans by the pointer delta. Geometry clamping lives in
+        // ViewState (unit-tested), so the behaviour is verified manually.
+        ta := TouchArea {
+            scroll-event(e) => {
+                root.zoom-by(e.delta-y > 0 ? root.zoom-step : 1.0 / root.zoom-step, self.mouse-x, self.mouse-y);
+                return EventResult.accept;
+            }
+            pointer-event(e) => {
+                if (e.kind == PointerEventKind.down) {
+                    root.pan-anchor-x = self.mouse-x;
+                    root.pan-anchor-y = self.mouse-y;
+                }
+            }
+            moved => {
+                root.pan-by(self.mouse-x - root.pan-anchor-x, self.mouse-y - root.pan-anchor-y);
+                root.pan-anchor-x = self.mouse-x;
+                root.pan-anchor-y = self.mouse-y;
+            }
         }
     }
 
